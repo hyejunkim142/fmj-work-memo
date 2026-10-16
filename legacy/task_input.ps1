@@ -305,7 +305,6 @@ try {
     $form.Text = '업무지시 입력'
     $form.Font = New-Object System.Drawing.Font('맑은 고딕', 9)
     $form.ClientSize = New-Object System.Drawing.Size($W, $H)
-    $form.MinimumSize = $form.Size
     $form.StartPosition = 'CenterScreen'
     $form.FormBorderStyle = 'Sizable'
     $form.MaximizeBox = $false
@@ -360,19 +359,64 @@ try {
 
     [void](Add-Ctl (New-Label '찾기' $false) 6 110 0 0 '')
     $txtSearch = New-Object System.Windows.Forms.TextBox
-    [void](Add-Ctl $txtSearch 38 107 ($W - 46) 23 'Top, Left, Right')
-    $tip.SetToolTip($txtSearch, '글자를 넣으면 목록이 줄어듭니다 (Ctrl+F, Esc = 지우기)')
+    [void](Add-Ctl $txtSearch 38 107 ($W - 46 - 80) 23 'Top, Left, Right')
+    $tip.SetToolTip($txtSearch, '글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)')
+    $btnView = Add-Ctl (New-Button '내용보기') ($W - 82) 106 74 25 'Top, Right'
 
-    $lblList = Add-Ctl (New-Label '' $true) 6 135 0 0 ''
+    # 목록 영역 (접었다 폈다 함). 평소에는 입력칸 + 찾기 칸만 보이는 작은 창
+    $TopH = 134; $StatusH = 26; $CollapsedH = $TopH + $StatusH
+    $script:expanded = $true
+    $script:expandedH = $H
+    $pnlList = New-Object System.Windows.Forms.Panel
+    $pnlList.Visible = $false
+    [void](Add-Ctl $pnlList 0 $TopH $W ($H - $TopH - $StatusH) 'Top, Left, Right')
+    $ph = $pnlList.Height
+    function Add-PCtl($ctl, [int]$x, [int]$y, [int]$w, [int]$h, [string]$anchor) {
+        $ctl.Location = New-Object System.Drawing.Point($x, $y)
+        if ($w -gt 0) { $ctl.Size = New-Object System.Drawing.Size($w, $h) }
+        if ($anchor) { $ctl.Anchor = $anchor }
+        $pnlList.Controls.Add($ctl)
+        return $ctl
+    }
+
+    $lblList = Add-PCtl (New-Label '' $true) 6 0 0 0 ''
 
     $lstOpen = New-Object System.Windows.Forms.ListBox
     $lstOpen.HorizontalScrollbar = $true
     $lstOpen.IntegralHeight = $false
-    [void](Add-Ctl $lstOpen 8 153 ($W - 16) ($H - 153 - 62) 'Top, Bottom, Left, Right')
+    [void](Add-PCtl $lstOpen 8 18 ($W - 16) ($ph - 18 - 34) 'Top, Bottom, Left, Right')
 
-    $btnDone    = Add-Ctl (New-Button '완료') 8 ($H - 56) 60 26 'Bottom, Left'
-    $btnRefresh = Add-Ctl (New-Button '새로고침') 72 ($H - 56) 70 26 'Bottom, Left'
-    $btnOpen    = Add-Ctl (New-Button '메모장') ($W - 72) ($H - 56) 64 26 'Bottom, Right'
+    $btnDone    = Add-PCtl (New-Button '완료') 8 ($ph - 30) 60 26 'Bottom, Left'
+    $btnRefresh = Add-PCtl (New-Button '새로고침') 72 ($ph - 30) 70 26 'Bottom, Left'
+    $btnOpen    = Add-PCtl (New-Button '메모장') ($W - 72) ($ph - 30) 64 26 'Bottom, Right'
+
+    # 목록 펼치기/접기. 접으면 세로 크기를 고정하고, 펴면 마지막으로 쓰던 높이로 돌아감
+    function Set-Expanded([bool]$open) {
+        if ($open -eq $script:expanded -and $pnlList.Visible -eq $open) { return }
+        $form.SuspendLayout()
+        if ($open) {
+            $form.MaximumSize = [System.Drawing.Size]::Empty
+            $form.MinimumSize = [System.Drawing.Size]::Empty
+            $form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, $script:expandedH)
+            $pnlList.Size = New-Object System.Drawing.Size($form.ClientSize.Width, ($script:expandedH - $TopH - $StatusH))
+            $pnlList.Anchor = 'Top, Bottom, Left, Right'
+            $pnlList.Visible = $true
+            $form.MinimumSize = New-Object System.Drawing.Size($form.Width, ($form.Height - $form.ClientSize.Height + $CollapsedH + 140))
+            $btnView.Text = '내용닫기'
+        } else {
+            if ($script:expanded) { $script:expandedH = $form.ClientSize.Height }
+            $pnlList.Visible = $false
+            $pnlList.Anchor = 'Top, Left, Right'
+            $form.MaximumSize = [System.Drawing.Size]::Empty
+            $form.MinimumSize = [System.Drawing.Size]::Empty
+            $form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, $CollapsedH)
+            $form.MinimumSize = $form.Size
+            $form.MaximumSize = New-Object System.Drawing.Size(0, $form.Height)   # 0 = 가로는 제한 없음
+            $btnView.Text = '내용보기'
+        }
+        $script:expanded = $open
+        $form.ResumeLayout($true)
+    }
 
     $lblStatus = New-Object System.Windows.Forms.Label
     $lblStatus.AutoSize = $false
@@ -513,7 +557,11 @@ try {
     $btnSave.Add_Click($doSave)
     $btnDone.Add_Click($doComplete)
     $lstOpen.Add_DoubleClick($doComplete)
-    $txtSearch.Add_TextChanged({ Apply-Filter })
+    $txtSearch.Add_TextChanged({
+        Apply-Filter
+        if ($txtSearch.Text.Trim() -and -not $script:expanded) { Set-Expanded $true }
+    })
+    $btnView.Add_Click({ Set-Expanded (-not $script:expanded) })
     $btnRefresh.Add_Click({ Update-List })
     $btnOpen.Add_Click({
         try {
@@ -527,11 +575,14 @@ try {
         elseif ($e.Control -and $e.KeyCode -eq 'F') { $e.SuppressKeyPress = $true; $txtSearch.Focus() | Out-Null; $txtSearch.SelectAll() }
         elseif ($e.KeyCode -eq 'Enter' -and $lstOpen.Focused) { $e.SuppressKeyPress = $true; & $doComplete }
         elseif ($e.KeyCode -eq 'Escape') {
-            if ($txtSearch.Text) { $txtSearch.Clear() } else { $form.Close() }
+            if ($txtSearch.Text) { $txtSearch.Clear() }
+            elseif ($script:expanded) { Set-Expanded $false }
+            else { $form.Close() }
         }
     })
     $form.Add_Shown({ Update-List; $txtContent.Focus() | Out-Null; $form.Activate() })
 
+    Set-Expanded $false
     [void]$form.ShowDialog()
 } catch {
     # 창이 숨김으로 실행되므로, 예상 못 한 오류도 반드시 화면과 기록 파일에 남김

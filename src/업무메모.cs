@@ -388,6 +388,11 @@ namespace FmjMemo
         CheckBox chkUrgent;
         ListBox lstOpen;
         Label lblList, lblStatus;
+        Panel pnlList;
+        Button btnView;
+        bool expanded;
+        int expandedH;
+        const int TopH = 134, StatusH = 26, CollapsedH = TopH + StatusH;
         List<Item> allItems = new List<Item>();
         List<Item> shown = new List<Item>();
 
@@ -408,13 +413,13 @@ namespace FmjMemo
 
         public MainForm()
         {
-            // 작은 창 (가로 350 x 세로 330). 테두리를 끌어서 크기를 늘릴 수 있음
-            const int W = 350, H = 330;
+            // 평소에는 입력칸 + 찾기 칸만 보이는 작은 창. [내용보기]를 누르거나 찾기 칸에 글자를 넣으면 목록이 펼쳐짐
+            const int W = 350;
+            expandedH = 330;
             var small = new Font("맑은 고딕", 8.5F);
             Text = "업무메모";
             Font = new Font("맑은 고딕", 9F);
-            ClientSize = new Size(W, H);
-            MinimumSize = Size;
+            ClientSize = new Size(W, expandedH);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = false;
@@ -423,6 +428,7 @@ namespace FmjMemo
             var tip = new ToolTip { AutoPopDelay = 20000, InitialDelay = 300 };
             var TL = AnchorStyles.Top | AnchorStyles.Left;
             var TLR = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            var TR = AnchorStyles.Top | AnchorStyles.Right;
             var BL = AnchorStyles.Bottom | AnchorStyles.Left;
 
             var lbHint = AddLabel("업무 내용  (Ctrl+Enter = 저장)", 6, 6);
@@ -440,20 +446,28 @@ namespace FmjMemo
             Controls.Add(dtDue);
             chkUrgent = new CheckBox { Text = "긴급", AutoSize = true, Location = new Point(222, 77), Anchor = TL };
             Controls.Add(chkUrgent);
-            var btnSave = AddButton("저장", W - 68, 74, 60, 25, (s, e) => DoSave());
-            btnSave.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            AddButton("저장", W - 68, 74, 60, 25, (s, e) => DoSave()).Anchor = TR;
 
             AddLabel("찾기", 6, 110);
-            txtSearch = new TextBox { Location = new Point(38, 107), Size = new Size(W - 46, 23), Anchor = TLR };
-            tip.SetToolTip(txtSearch, "글자를 넣으면 목록이 줄어듭니다 (Ctrl+F, Esc = 지우기)");
-            txtSearch.TextChanged += (s, e) => ApplyFilter();
+            txtSearch = new TextBox { Location = new Point(38, 107), Size = new Size(W - 46 - 80, 23), Anchor = TLR };
+            tip.SetToolTip(txtSearch, "글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)");
+            txtSearch.TextChanged += (s, e) =>
+            {
+                ApplyFilter();
+                if (txtSearch.Text.Trim().Length > 0 && !expanded) SetExpanded(true);
+            };
             Controls.Add(txtSearch);
+            btnView = AddButton("내용보기", W - 82, 106, 74, 25, (s, e) => SetExpanded(!expanded));
+            btnView.Anchor = TR;
 
-            lblList = AddLabel("", 6, 135);
-            lblList.Font = small; lblList.ForeColor = Color.DimGray;
-
+            // 목록 영역 (접었다 폈다 함)
+            pnlList = new Panel { Location = new Point(0, TopH), Size = new Size(W, expandedH - TopH - StatusH), Anchor = TLR, Visible = false };
+            Controls.Add(pnlList);
+            int ph = pnlList.Height;
+            lblList = new Label { AutoSize = true, Location = new Point(6, 0), Font = small, ForeColor = Color.DimGray };
+            pnlList.Controls.Add(lblList);
             lstOpen = new ListBox { HorizontalScrollbar = true, IntegralHeight = false,
-                Location = new Point(8, 153), Size = new Size(W - 16, H - 153 - 62),
+                Location = new Point(8, 18), Size = new Size(W - 16, ph - 18 - 34),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
             lstOpen.DoubleClick += (s, e) => DoComplete();
             // 창이 좁아 잘리는 내용은 마우스를 올리면 전체가 보이게 함
@@ -465,18 +479,27 @@ namespace FmjMemo
                 tipIndex = i;
                 tip.SetToolTip(lstOpen, i >= 0 && i < shown.Count ? shown[i].Display : "");
             };
-            Controls.Add(lstOpen);
-
-            AddButton("완료", 8, H - 56, 60, 26, (s, e) => DoComplete()).Anchor = BL;
-            AddButton("새로고침", 72, H - 56, 70, 26, (s, e) => RefreshList()).Anchor = BL;
-            AddButton("폴더", 146, H - 56, 50, 26, (s, e) => OpenFolder()).Anchor = BL;
-            AddButton("메모장", W - 72, H - 56, 64, 26, (s, e) => OpenNotepad()).Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            pnlList.Controls.Add(lstOpen);
+            Func<string, int, int, EventHandler, AnchorStyles, Button> panelButton = (text, x, w, onClick, anchor) =>
+            {
+                var b = new Button { Text = text, Location = new Point(x, ph - 30), Size = new Size(w, 26), Anchor = anchor };
+                b.Click += onClick;
+                pnlList.Controls.Add(b);
+                return b;
+            };
+            panelButton("완료", 8, 60, (s, e) => DoComplete(), BL);
+            panelButton("새로고침", 72, 70, (s, e) => RefreshList(), BL);
+            panelButton("폴더", 146, 50, (s, e) => OpenFolder(), BL);
+            panelButton("메모장", W - 72, 64, (s, e) => OpenNotepad(), AnchorStyles.Bottom | AnchorStyles.Right);
 
             lblStatus = new Label { AutoSize = false, AutoEllipsis = true, Font = small, ForeColor = Color.DimGray,
-                Location = new Point(6, H - 24), Size = new Size(W - 12, 20),
+                Location = new Point(6, expandedH - 22), Size = new Size(W - 12, 20),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
             lblStatus.TextChanged += (s, e) => tip.SetToolTip(lblStatus, lblStatus.Text);
             Controls.Add(lblStatus);
+
+            expanded = true;   // 처음엔 펼친 크기로 만든 뒤 접어서 시작
+            SetExpanded(false);
 
             KeyDown += OnKey;
             Shown += (s, e) =>
@@ -486,6 +509,38 @@ namespace FmjMemo
                 Activate();
                 BeginInvoke(new Action(Program.OfferShortcut));
             };
+        }
+
+        // 목록 펼치기/접기. 접으면 세로 크기를 고정하고, 펴면 마지막으로 쓰던 높이로 돌아감
+        void SetExpanded(bool open)
+        {
+            if (open == expanded && pnlList.Visible == open) return;
+            SuspendLayout();
+            if (open)
+            {
+                MaximumSize = Size.Empty;
+                MinimumSize = Size.Empty;
+                ClientSize = new Size(ClientSize.Width, expandedH);
+                pnlList.Size = new Size(ClientSize.Width, expandedH - TopH - StatusH);
+                pnlList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+                pnlList.Visible = true;
+                MinimumSize = new Size(Width, Height - ClientSize.Height + CollapsedH + 140);
+                btnView.Text = "내용닫기";
+            }
+            else
+            {
+                if (expanded) expandedH = ClientSize.Height;
+                pnlList.Visible = false;
+                pnlList.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                MaximumSize = Size.Empty;
+                MinimumSize = Size.Empty;
+                ClientSize = new Size(ClientSize.Width, CollapsedH);
+                MinimumSize = new Size(Width, Height);
+                MaximumSize = new Size(0, Height);   // 0 = 가로는 제한 없음
+                btnView.Text = "내용보기";
+            }
+            expanded = open;
+            ResumeLayout(true);
         }
 
         void SetStatus(string msg, bool isError)
@@ -620,7 +675,9 @@ namespace FmjMemo
             else if (e.KeyCode == Keys.Enter && lstOpen.Focused) { e.SuppressKeyPress = true; DoComplete(); }
             else if (e.KeyCode == Keys.Escape)
             {
-                if (txtSearch.Text.Length > 0) txtSearch.Clear(); else Close();
+                if (txtSearch.Text.Length > 0) txtSearch.Clear();
+                else if (expanded) SetExpanded(false);
+                else Close();
             }
         }
     }
