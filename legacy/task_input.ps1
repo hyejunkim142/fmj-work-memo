@@ -228,6 +228,22 @@ function Get-DoneKeys {
     return ,$set
 }
 
+# 모든 값이 정수이고 위에서부터 계속 커지는 칸 = 줄 순번 칸. 없으면 -1
+function Get-SequenceColumn($rows) {
+    if ($rows.Length -lt 2) { return -1 }
+    $cols = ($rows | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    for ($k = 0; $k -lt $cols; $k++) {
+        $prev = [int]::MinValue; $ok = $true
+        for ($r = 1; $r -lt $rows.Length; $r++) {
+            $v = 0
+            if ($k -ge $rows[$r].Length -or -not [int]::TryParse($rows[$r][$k], [ref]$v) -or $v -le $prev) { $ok = $false; break }
+            $prev = $v
+        }
+        if ($ok) { return $k }
+    }
+    return -1
+}
+
 function Get-ExcelItems {
     # 반환: @{ File = 파일정보; Items = 미완료 항목들; DoneCount = 숨긴 건수 }
     $file = Get-LatestExcel
@@ -238,15 +254,18 @@ function Get-ExcelItems {
         if ($rows.Length -gt 1) {
             $head = $rows[0]
             # '번호/ID/문서/코드'가 들어간 칸이 있으면 그 칸 값으로 같은 건인지 구분, 없으면 줄 전체로 구분
+            # 단, 1,2,3…처럼 줄 순번인 칸은 매일 바뀔 수 있으므로 구분 기준에서 뺌
+            $seqCol = Get-SequenceColumn $rows
             $keyCol = -1
             for ($k = 0; $k -lt $head.Length; $k++) {
-                if ($head[$k] -match '번호|ID|문서|코드') { $keyCol = $k; break }
+                if ($k -ne $seqCol -and $head[$k] -match '번호|ID|문서|코드') { $keyCol = $k; break }
             }
             $done = Get-DoneKeys
             for ($r = 1; $r -lt $rows.Length; $r++) {
                 $row = $rows[$r]
                 $text = (($row | Where-Object { $_ }) -join ' | ')
-                $key = $text
+                $keyParts = for ($k = 0; $k -lt $row.Length; $k++) { if ($k -ne $seqCol -and $row[$k]) { $row[$k] } }
+                $key = (@($keyParts) -join ' | ')
                 if ($keyCol -ge 0 -and $keyCol -lt $row.Length -and $row[$keyCol]) { $key = $head[$keyCol] + '=' + $row[$keyCol] }
                 if ($done.Contains($key)) { $hidden++; continue }
                 $items.Add([pscustomobject]@{ Source = '결재'; Key = $key; Text = $text; Display = '[결재] ' + $text })
@@ -279,99 +298,100 @@ if (-not $createdNew) {
 try {
     if (-not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir | Out-Null }
 
-    $W = 700
-    $font = New-Object System.Drawing.Font('맑은 고딕', 10)
+    # 작은 창 (가로 350 x 세로 330). 테두리를 끌어서 크기를 늘릴 수 있음
+    $W = 350; $H = 330
+    $small = New-Object System.Drawing.Font('맑은 고딕', 8.5)
     $form = New-Object System.Windows.Forms.Form
     $form.Text = '업무지시 입력'
-    $form.Font = $font
-    $form.ClientSize = New-Object System.Drawing.Size($W, 640)
+    $form.Font = New-Object System.Drawing.Font('맑은 고딕', 9)
+    $form.ClientSize = New-Object System.Drawing.Size($W, $H)
+    $form.MinimumSize = $form.Size
     $form.StartPosition = 'CenterScreen'
-    $form.FormBorderStyle = 'FixedSingle'
+    $form.FormBorderStyle = 'Sizable'
     $form.MaximizeBox = $false
     $form.KeyPreview = $true
+    $tip = New-Object System.Windows.Forms.ToolTip
+    $tip.AutoPopDelay = 20000; $tip.InitialDelay = 300
 
-    function Add-Label([string]$text, [int]$x, [int]$y) {
+    function Add-Ctl($ctl, [int]$x, [int]$y, [int]$w, [int]$h, [string]$anchor) {
+        $ctl.Location = New-Object System.Drawing.Point($x, $y)
+        if ($w -gt 0) { $ctl.Size = New-Object System.Drawing.Size($w, $h) }
+        if ($anchor) { $ctl.Anchor = $anchor }
+        $form.Controls.Add($ctl)
+        return $ctl
+    }
+    function New-Label([string]$text, [bool]$isSmall) {
         $lb = New-Object System.Windows.Forms.Label
         $lb.Text = $text; $lb.AutoSize = $true
-        $lb.Location = New-Object System.Drawing.Point($x, $y)
-        $form.Controls.Add($lb)
+        if ($isSmall) { $lb.Font = $small; $lb.ForeColor = [System.Drawing.Color]::DimGray }
         return $lb
     }
+    function New-Button([string]$text) {
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $text
+        return $b
+    }
 
-    [void](Add-Label '업무 내용' 15 12)
+    [void](Add-Ctl (New-Label '업무 내용  (Ctrl+Enter = 저장)' $true) 6 6 0 0 '')
     $txtContent = New-Object System.Windows.Forms.TextBox
     $txtContent.Multiline = $true
     $txtContent.ScrollBars = 'Vertical'
     $txtContent.AcceptsReturn = $true
-    $txtContent.Location = New-Object System.Drawing.Point(15, 35)
-    $txtContent.Size = New-Object System.Drawing.Size(($W - 30), 90)
-    $form.Controls.Add($txtContent)
+    [void](Add-Ctl $txtContent 8 24 ($W - 16) 44 'Top, Left, Right')
 
-    [void](Add-Label '담당자' 15 138)
+    [void](Add-Ctl (New-Label '담당' $false) 6 78 0 0 '')
     $txtOwner = New-Object System.Windows.Forms.TextBox
-    $txtOwner.Location = New-Object System.Drawing.Point(75, 135)
-    $txtOwner.Size = New-Object System.Drawing.Size(120, 25)
-    $form.Controls.Add($txtOwner)
+    [void](Add-Ctl $txtOwner 38 75 62 23 'Top, Left')
 
-    [void](Add-Label '마감' 210 138)
     $dtDue = New-Object System.Windows.Forms.DateTimePicker
     $dtDue.Format = 'Custom'
-    $dtDue.CustomFormat = 'yyyy-MM-dd (ddd)'
+    $dtDue.CustomFormat = 'MM-dd (ddd)'
     $dtDue.ShowCheckBox = $true
     $dtDue.Checked = $false
-    $dtDue.Location = New-Object System.Drawing.Point(250, 135)
-    $dtDue.Size = New-Object System.Drawing.Size(175, 25)
-    $form.Controls.Add($dtDue)
+    [void](Add-Ctl $dtDue 104 75 112 23 'Top, Left')
+    $tip.SetToolTip($dtDue, '마감일 (체크해야 저장됨)')
 
     $chkUrgent = New-Object System.Windows.Forms.CheckBox
     $chkUrgent.Text = '긴급'
     $chkUrgent.AutoSize = $true
-    $chkUrgent.Location = New-Object System.Drawing.Point(440, 137)
-    $form.Controls.Add($chkUrgent)
+    [void](Add-Ctl $chkUrgent 222 77 0 0 'Top, Left')
 
-    $btnSave = New-Object System.Windows.Forms.Button
-    $btnSave.Text = '저장  (Ctrl+Enter)'
-    $btnSave.Location = New-Object System.Drawing.Point(15, 170)
-    $btnSave.Size = New-Object System.Drawing.Size(($W - 30), 36)
-    $form.Controls.Add($btnSave)
+    $btnSave = Add-Ctl (New-Button '저장') ($W - 68) 74 60 25 'Top, Right'
 
-    $lblList = Add-Label '진행중 업무  (더블클릭 = 완료)' 15 223
-    [void](Add-Label '찾기' 420 223)
+    [void](Add-Ctl (New-Label '찾기' $false) 6 110 0 0 '')
     $txtSearch = New-Object System.Windows.Forms.TextBox
-    $txtSearch.Location = New-Object System.Drawing.Point(460, 220)
-    $txtSearch.Size = New-Object System.Drawing.Size(($W - 475), 25)
-    $form.Controls.Add($txtSearch)
+    [void](Add-Ctl $txtSearch 38 107 ($W - 46) 23 'Top, Left, Right')
+    $tip.SetToolTip($txtSearch, '글자를 넣으면 목록이 줄어듭니다 (Ctrl+F, Esc = 지우기)')
+
+    $lblList = Add-Ctl (New-Label '' $true) 6 135 0 0 ''
 
     $lstOpen = New-Object System.Windows.Forms.ListBox
     $lstOpen.HorizontalScrollbar = $true
-    $lstOpen.Location = New-Object System.Drawing.Point(15, 250)
-    $lstOpen.Size = New-Object System.Drawing.Size(($W - 30), 300)
-    $form.Controls.Add($lstOpen)
+    $lstOpen.IntegralHeight = $false
+    [void](Add-Ctl $lstOpen 8 153 ($W - 16) ($H - 153 - 62) 'Top, Bottom, Left, Right')
 
-    $btnDone = New-Object System.Windows.Forms.Button
-    $btnDone.Text = '선택 항목 완료'
-    $btnDone.Location = New-Object System.Drawing.Point(15, 558)
-    $btnDone.Size = New-Object System.Drawing.Size(160, 32)
-    $form.Controls.Add($btnDone)
-
-    $btnRefresh = New-Object System.Windows.Forms.Button
-    $btnRefresh.Text = '새로고침'
-    $btnRefresh.Location = New-Object System.Drawing.Point(180, 558)
-    $btnRefresh.Size = New-Object System.Drawing.Size(100, 32)
-    $form.Controls.Add($btnRefresh)
-
-    $btnOpen = New-Object System.Windows.Forms.Button
-    $btnOpen.Text = '메모장으로 열기'
-    $btnOpen.Location = New-Object System.Drawing.Point(($W - 175), 558)
-    $btnOpen.Size = New-Object System.Drawing.Size(160, 32)
-    $form.Controls.Add($btnOpen)
+    $btnDone    = Add-Ctl (New-Button '완료') 8 ($H - 56) 60 26 'Bottom, Left'
+    $btnRefresh = Add-Ctl (New-Button '새로고침') 72 ($H - 56) 70 26 'Bottom, Left'
+    $btnOpen    = Add-Ctl (New-Button '메모장') ($W - 72) ($H - 56) 64 26 'Bottom, Right'
 
     $lblStatus = New-Object System.Windows.Forms.Label
     $lblStatus.AutoSize = $false
-    $lblStatus.Location = New-Object System.Drawing.Point(15, 600)
-    $lblStatus.Size = New-Object System.Drawing.Size(($W - 30), 30)
+    $lblStatus.AutoEllipsis = $true
+    $lblStatus.Font = $small
     $lblStatus.ForeColor = [System.Drawing.Color]::DimGray
-    $form.Controls.Add($lblStatus)
+    [void](Add-Ctl $lblStatus 6 ($H - 24) ($W - 12) 20 'Bottom, Left, Right')
+    $lblStatus.Add_TextChanged({ $tip.SetToolTip($lblStatus, $lblStatus.Text) })
+
+    # 창이 좁아 잘리는 내용은 마우스를 올리면 전체가 보이게 함
+    $script:tipIndex = -1
+    $lstOpen.Add_MouseMove({
+        param($s, $e)
+        $i = $lstOpen.IndexFromPoint($e.Location)
+        if ($i -eq $script:tipIndex) { return }
+        $script:tipIndex = $i
+        if ($i -ge 0 -and $i -lt $script:shown.Length) { $tip.SetToolTip($lstOpen, $script:shown[$i].Display) }
+        else { $tip.SetToolTip($lstOpen, '') }
+    })
 
     $script:allItems = [Collections.Generic.List[object]]::new()
     $script:shown = @()
@@ -410,8 +430,8 @@ try {
         $lstOpen.Items.Clear()
         foreach ($it in $script:shown) { [void]$lstOpen.Items.Add($it.Display) }
         $lstOpen.EndUpdate()
-        if ($words.Count -gt 0) { $lblList.Text = '진행중 업무  (찾은 결과 {0} / 전체 {1}건)' -f $script:shown.Length, $script:allItems.Count }
-        else { $lblList.Text = '진행중 업무  (전체 {0}건, 더블클릭 = 완료)' -f $script:allItems.Count }
+        if ($words.Count -gt 0) { $lblList.Text = '찾은 결과 {0} / 전체 {1}건  ·  더블클릭 = 완료' -f $script:shown.Length, $script:allItems.Count }
+        else { $lblList.Text = '진행중 {0}건  ·  더블클릭 = 완료' -f $script:allItems.Count }
     }
 
     function Update-List {
@@ -421,7 +441,7 @@ try {
         try {
             $ex = Get-ExcelItems
             foreach ($it in $ex.Items) { $script:allItems.Add($it) }
-            if ($ex.File) { $msgs += ('결재: {0} ({1}건, 완료해서 숨김 {2}건)' -f $ex.File.Name, $ex.Items.Length, $ex.DoneCount) }
+            if ($ex.File) { $msgs += ('결재 {1}건 (완료 숨김 {2}) - {0}' -f $ex.File.Name, $ex.Items.Length, $ex.DoneCount) }
             else { $msgs += '결재 엑셀 파일 없음'; $isErr = $true }
         } catch {
             Write-ErrorLog ('엑셀 읽기: ' + $_.Exception.Message)
@@ -430,12 +450,12 @@ try {
         try {
             $memo = Get-OpenTasks
             foreach ($t in $memo) { $script:allItems.Add((New-MemoItem $t)) }
-            $msgs += ('메모: {0}건' -f $memo.Length)
+            $msgs += ('메모 {0}건' -f $memo.Length)
         } catch {
             Write-ErrorLog ('메모 읽기: ' + $_.Exception.Message)
             $msgs += '메모 읽기 실패'; $isErr = $true
         }
-        $script:excelNote = $msgs -join '  /  '
+        $script:excelNote = $msgs -join '  ·  '
         Apply-Filter
         Set-Status $script:excelNote $isErr
     }
@@ -468,7 +488,7 @@ try {
 
     $doComplete = {
         $idx = $lstOpen.SelectedIndex
-        if ($idx -lt 0 -or $idx -ge $script:shown.Length) { Set-Status '완료할 항목을 먼저 고르세요. (찾기 칸에 글자를 넣으면 목록이 줄어듭니다)' $true; return }
+        if ($idx -lt 0 -or $idx -ge $script:shown.Length) { Set-Status '완료할 항목을 먼저 고르세요.' $true; return }
         $item = $script:shown[$idx]
         try {
             if ($item.Source -eq '결재') {

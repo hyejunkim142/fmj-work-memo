@@ -333,20 +333,41 @@ namespace FmjMemo
             if (rows.Count < 2) return res;
             var head = rows[0];
             // '번호/ID/문서/코드'가 들어간 칸이 있으면 그 칸 값으로 같은 건인지 구분, 없으면 줄 전체로 구분
+            // 단, 1,2,3…처럼 줄 순번인 칸은 매일 바뀔 수 있으므로 구분 기준에서 뺌
+            int seqCol = SequenceColumn(rows);
             int keyCol = -1;
             for (int k = 0; k < head.Length; k++)
-                if (Regex.IsMatch(head[k], "번호|ID|문서|코드")) { keyCol = k; break; }
+                if (k != seqCol && Regex.IsMatch(head[k], "번호|ID|문서|코드")) { keyCol = k; break; }
             var done = DoneKeys();
             for (int r = 1; r < rows.Count; r++)
             {
                 var row = rows[r];
                 string text = string.Join(" | ", row.Where(x => x.Length > 0));
-                string key = text;
+                string key = string.Join(" | ", row.Where((x, i) => i != seqCol && x.Length > 0));
                 if (keyCol >= 0 && keyCol < row.Length && row[keyCol].Length > 0) key = head[keyCol] + "=" + row[keyCol];
                 if (done.Contains(key)) { res.Hidden++; continue; }
                 res.Items.Add(new Item { Source = "결재", Key = key, Text = text, Display = "[결재] " + text });
             }
             return res;
+        }
+
+        // 모든 값이 정수이고 위에서부터 계속 커지는 칸 = 줄 순번 칸. 없으면 -1
+        public static int SequenceColumn(List<string[]> rows)
+        {
+            if (rows.Count < 2) return -1;
+            int cols = rows.Max(r => r.Length);
+            for (int k = 0; k < cols; k++)
+            {
+                int prev = int.MinValue; bool ok = true;
+                for (int r = 1; r < rows.Count && ok; r++)
+                {
+                    int v;
+                    if (k >= rows[r].Length || !int.TryParse(rows[r][k], out v) || v <= prev) ok = false;
+                    else prev = v;
+                }
+                if (ok) return k;
+            }
+            return -1;
         }
 
         public static void CompleteExcel(Item it)
@@ -387,51 +408,74 @@ namespace FmjMemo
 
         public MainForm()
         {
-            const int W = 700;
+            // 작은 창 (가로 350 x 세로 330). 테두리를 끌어서 크기를 늘릴 수 있음
+            const int W = 350, H = 330;
+            var small = new Font("맑은 고딕", 8.5F);
             Text = "업무메모";
-            Font = new Font("맑은 고딕", 10F);
-            ClientSize = new Size(W, 640);
+            Font = new Font("맑은 고딕", 9F);
+            ClientSize = new Size(W, H);
+            MinimumSize = Size;
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
+            FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = false;
             KeyPreview = true;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            var tip = new ToolTip { AutoPopDelay = 20000, InitialDelay = 300 };
+            var TL = AnchorStyles.Top | AnchorStyles.Left;
+            var TLR = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            var BL = AnchorStyles.Bottom | AnchorStyles.Left;
 
-            AddLabel("업무 내용", 15, 12);
+            var lbHint = AddLabel("업무 내용  (Ctrl+Enter = 저장)", 6, 6);
+            lbHint.Font = small; lbHint.ForeColor = Color.DimGray;
             txtContent = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true,
-                Location = new Point(15, 35), Size = new Size(W - 30, 90) };
+                Location = new Point(8, 24), Size = new Size(W - 16, 44), Anchor = TLR };
             Controls.Add(txtContent);
 
-            AddLabel("담당자", 15, 138);
-            txtOwner = new TextBox { Location = new Point(75, 135), Size = new Size(120, 25) };
+            AddLabel("담당", 6, 78);
+            txtOwner = new TextBox { Location = new Point(38, 75), Size = new Size(62, 23), Anchor = TL };
             Controls.Add(txtOwner);
-
-            AddLabel("마감", 210, 138);
-            dtDue = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd (ddd)",
-                ShowCheckBox = true, Checked = false, Location = new Point(250, 135), Size = new Size(175, 25) };
+            dtDue = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "MM-dd (ddd)",
+                ShowCheckBox = true, Checked = false, Location = new Point(104, 75), Size = new Size(112, 23), Anchor = TL };
+            tip.SetToolTip(dtDue, "마감일 (체크해야 저장됨)");
             Controls.Add(dtDue);
-
-            chkUrgent = new CheckBox { Text = "긴급", AutoSize = true, Location = new Point(440, 137) };
+            chkUrgent = new CheckBox { Text = "긴급", AutoSize = true, Location = new Point(222, 77), Anchor = TL };
             Controls.Add(chkUrgent);
+            var btnSave = AddButton("저장", W - 68, 74, 60, 25, (s, e) => DoSave());
+            btnSave.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
-            AddButton("저장  (Ctrl+Enter)", 15, 170, W - 30, 36, (s, e) => DoSave());
-
-            lblList = AddLabel("진행중 업무  (더블클릭 = 완료)", 15, 223);
-            AddLabel("찾기", 420, 223);
-            txtSearch = new TextBox { Location = new Point(460, 220), Size = new Size(W - 475, 25) };
+            AddLabel("찾기", 6, 110);
+            txtSearch = new TextBox { Location = new Point(38, 107), Size = new Size(W - 46, 23), Anchor = TLR };
+            tip.SetToolTip(txtSearch, "글자를 넣으면 목록이 줄어듭니다 (Ctrl+F, Esc = 지우기)");
             txtSearch.TextChanged += (s, e) => ApplyFilter();
             Controls.Add(txtSearch);
 
-            lstOpen = new ListBox { HorizontalScrollbar = true, Location = new Point(15, 250), Size = new Size(W - 30, 300) };
+            lblList = AddLabel("", 6, 135);
+            lblList.Font = small; lblList.ForeColor = Color.DimGray;
+
+            lstOpen = new ListBox { HorizontalScrollbar = true, IntegralHeight = false,
+                Location = new Point(8, 153), Size = new Size(W - 16, H - 153 - 62),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
             lstOpen.DoubleClick += (s, e) => DoComplete();
+            // 창이 좁아 잘리는 내용은 마우스를 올리면 전체가 보이게 함
+            int tipIndex = -1;
+            lstOpen.MouseMove += (s, e) =>
+            {
+                int i = lstOpen.IndexFromPoint(e.Location);
+                if (i == tipIndex) return;
+                tipIndex = i;
+                tip.SetToolTip(lstOpen, i >= 0 && i < shown.Count ? shown[i].Display : "");
+            };
             Controls.Add(lstOpen);
 
-            AddButton("선택 항목 완료", 15, 558, 160, 32, (s, e) => DoComplete());
-            AddButton("새로고침", 180, 558, 100, 32, (s, e) => RefreshList());
-            AddButton("폴더 열기", 285, 558, 100, 32, (s, e) => OpenFolder());
-            AddButton("메모장으로 열기", W - 175, 558, 160, 32, (s, e) => OpenNotepad());
+            AddButton("완료", 8, H - 56, 60, 26, (s, e) => DoComplete()).Anchor = BL;
+            AddButton("새로고침", 72, H - 56, 70, 26, (s, e) => RefreshList()).Anchor = BL;
+            AddButton("폴더", 146, H - 56, 50, 26, (s, e) => OpenFolder()).Anchor = BL;
+            AddButton("메모장", W - 72, H - 56, 64, 26, (s, e) => OpenNotepad()).Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
 
-            lblStatus = new Label { AutoSize = false, Location = new Point(15, 600), Size = new Size(W - 30, 30), ForeColor = Color.DimGray };
+            lblStatus = new Label { AutoSize = false, AutoEllipsis = true, Font = small, ForeColor = Color.DimGray,
+                Location = new Point(6, H - 24), Size = new Size(W - 12, 20),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
+            lblStatus.TextChanged += (s, e) => tip.SetToolTip(lblStatus, lblStatus.Text);
             Controls.Add(lblStatus);
 
             KeyDown += OnKey;
@@ -466,8 +510,8 @@ namespace FmjMemo
             foreach (var it in shown) lstOpen.Items.Add(it.Display);
             lstOpen.EndUpdate();
             lblList.Text = words.Length > 0
-                ? string.Format("진행중 업무  (찾은 결과 {0} / 전체 {1}건)", shown.Count, allItems.Count)
-                : string.Format("진행중 업무  (전체 {0}건, 더블클릭 = 완료)", allItems.Count);
+                ? string.Format("찾은 결과 {0} / 전체 {1}건  ·  더블클릭 = 완료", shown.Count, allItems.Count)
+                : string.Format("진행중 {0}건  ·  더블클릭 = 완료", allItems.Count);
         }
 
         void RefreshList()
@@ -479,7 +523,7 @@ namespace FmjMemo
             {
                 var ex = Store.ExcelItems();
                 allItems.AddRange(ex.Items);
-                if (ex.FileName != null) msgs.Add(string.Format("결재: {0} ({1}건, 완료해서 숨김 {2}건)", ex.FileName, ex.Items.Count, ex.Hidden));
+                if (ex.FileName != null) msgs.Add(string.Format("결재 {1}건 (완료 숨김 {2}) - {0}", ex.FileName, ex.Items.Count, ex.Hidden));
                 else { msgs.Add("결재 엑셀 파일 없음"); isErr = true; }
             }
             catch (Exception e)
@@ -491,7 +535,7 @@ namespace FmjMemo
             {
                 var memo = Store.OpenTasks();
                 allItems.AddRange(memo.Select(Store.MemoItem));
-                msgs.Add(string.Format("메모: {0}건", memo.Length));
+                msgs.Add(string.Format("메모 {0}건", memo.Length));
             }
             catch (Exception e)
             {
@@ -499,7 +543,7 @@ namespace FmjMemo
                 msgs.Add("메모 읽기 실패"); isErr = true;
             }
             ApplyFilter();
-            SetStatus(string.Join("  /  ", msgs), isErr);
+            SetStatus(string.Join("  ·  ", msgs), isErr);
         }
 
         void DoSave()
@@ -526,7 +570,7 @@ namespace FmjMemo
         void DoComplete()
         {
             int idx = lstOpen.SelectedIndex;
-            if (idx < 0 || idx >= shown.Count) { SetStatus("완료할 항목을 먼저 고르세요. (찾기 칸에 글자를 넣으면 목록이 줄어듭니다)", true); return; }
+            if (idx < 0 || idx >= shown.Count) { SetStatus("완료할 항목을 먼저 고르세요.", true); return; }
             var it = shown[idx];
             try
             {
