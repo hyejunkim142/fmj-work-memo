@@ -1,0 +1,5 @@
+# PowerShell/배치 파일은 BOM·CRLF를 그대로 보존 (바뀌면 Windows에서 한글이 깨짐)
+*.ps1 -text
+*.bat -text
+*.exe binary
+*.ico binary
