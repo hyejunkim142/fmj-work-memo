@@ -403,7 +403,7 @@ namespace FmjMemo
         Button btnView;
         bool expanded;
         int expandedH;
-        const int Dy = 44;   // 업무 내용 칸을 기본(44)보다 키운 만큼 아래 칸들이 내려감
+        const int Dy = 300;  // 업무 내용 칸을 기본(44)보다 키운 만큼 아래 칸들이 내려감 (창 크기 = 스티커 메모 정도)
         const int TopH = 134 + Dy, StatusH = 26, CollapsedH = TopH + StatusH;
         Item detailItem;     // 찾기 칸에 번호를 넣어 내용을 보고 있는 항목 (없으면 null)
         List<Item> allItems = new List<Item>();
@@ -427,7 +427,7 @@ namespace FmjMemo
         public MainForm()
         {
             // 평소에는 입력칸 + 찾기 칸만 보이는 작은 창. [내용보기]를 누르거나 찾기 칸에 글자를 넣으면 목록이 펼쳐짐
-            const int W = 350;
+            const int W = 420;
             expandedH = 330 + Dy;
             var small = new Font("맑은 고딕", 8.5F);
             Text = "업무메모";
@@ -555,7 +555,8 @@ namespace FmjMemo
                 MinimumSize = Size.Empty;
                 ClientSize = new Size(ClientSize.Width, CollapsedH);
                 MinimumSize = new Size(Width, Height);
-                MaximumSize = new Size(0, Height);   // 0 = 가로는 제한 없음
+                // 가로는 제한 없음. 0을 넣으면 Windows가 창 폭을 0(최소 폭)으로 줄여 버리므로 화면 최대 폭을 넣음
+                MaximumSize = new Size(SystemInformation.MaxWindowTrackSize.Width, Height);
                 btnView.Text = "내용보기";
             }
             expanded = open;

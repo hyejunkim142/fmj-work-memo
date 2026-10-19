@@ -305,10 +305,10 @@ if (-not $createdNew) {
 try {
     if (-not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir | Out-Null }
 
-    # 작은 창 (가로 350 x 세로 374). 테두리를 끌어서 크기를 늘릴 수 있음
+    # 창 (가로 420 x 세로 630). 테두리를 끌어서 크기를 늘릴 수 있음
     # $Dy = 업무 내용 칸을 기본(44)보다 키운 만큼 아래 칸들이 내려감
-    $Dy = 44
-    $W = 350; $H = 330 + $Dy
+    $Dy = 300   # 창 크기 = 스티커 메모 정도
+    $W = 420; $H = 330 + $Dy
     $small = New-Object System.Drawing.Font('맑은 고딕', 8.5)
     $form = New-Object System.Windows.Forms.Form
     $form.Text = '업무지시 입력'
@@ -427,7 +427,8 @@ try {
             $form.MinimumSize = [System.Drawing.Size]::Empty
             $form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, $CollapsedH)
             $form.MinimumSize = $form.Size
-            $form.MaximumSize = New-Object System.Drawing.Size(0, $form.Height)   # 0 = 가로는 제한 없음
+            # 가로는 제한 없음. 0을 넣으면 Windows가 창 폭을 최소 폭으로 줄여 버리므로 화면 최대 폭을 넣음
+            $form.MaximumSize = New-Object System.Drawing.Size([System.Windows.Forms.SystemInformation]::MaxWindowTrackSize.Width, $form.Height)
             $btnView.Text = '내용보기'
         }
         $script:expanded = $open
