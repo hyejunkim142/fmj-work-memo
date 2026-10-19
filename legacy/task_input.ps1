@@ -273,8 +273,10 @@ function Get-ExcelItems {
                     $name = if ($k -lt $head.Length -and $head[$k]) { $head[$k] } else { '{0}열' -f ($k + 1) }
                     $name + ' : ' + $row[$k].Replace(' / ', "`r`n    ")
                 }
-                $seq = if ($seqCol -ge 0 -and $seqCol -lt $row.Length) { [string]$row[$seqCol] } else { '' }
-                $items.Add([pscustomobject]@{ Source = '결재'; Key = $key; Text = $text; Display = '[결재] ' + $text
+                # 순번 칸이 없으면 엑셀 줄 순서(1,2,3…)를 번호로 씀. 목록 앞에도 번호를 붙여 찾기 칸에 넣을 번호를 알 수 있게 함
+                $seq = if ($seqCol -ge 0 -and $seqCol -lt $row.Length) { [string]$row[$seqCol] } else { [string]$r }
+                $shownText = if ($seqCol -ge 0) { $text } else { $seq + ' | ' + $text }
+                $items.Add([pscustomobject]@{ Source = '결재'; Key = $key; Text = $text; Display = '[결재] ' + $shownText
                     Seq = $seq; Detail = (@($detail) -join "`r`n") })
             }
         }
@@ -369,8 +371,8 @@ try {
     [void](Add-Ctl (New-Label '찾기' $false) 6 (110 + $Dy) 0 0 '')
     $txtSearch = New-Object System.Windows.Forms.TextBox
     [void](Add-Ctl $txtSearch 38 (107 + $Dy) ($W - 46 - 80) 23 'Top, Left, Right')
-    $tip.SetToolTip($txtSearch, '글자를 넣으면 맞는 업무만 목록에 나옵니다. 순번(숫자)을 넣으면 그 업무 내용이 나옵니다 (Ctrl+F, Esc = 지우기)')
-    $btnView = Add-Ctl (New-Button '내용보기') ($W - 82) (106 + $Dy) 74 25 'Top, Right'
+    $tip.SetToolTip($txtSearch, '번호를 넣으면 그 업무 내용이 나옵니다. 글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)')
+    $btnView = Add-Ctl (New-Button '리스트') ($W - 82) (106 + $Dy) 74 25 'Top, Right'
 
     # 목록 영역 (접었다 폈다 함). 평소에는 입력칸 + 찾기 칸만 보이는 작은 창
     $TopH = 134 + $Dy; $StatusH = 26; $CollapsedH = $TopH + $StatusH
@@ -418,7 +420,7 @@ try {
             $pnlList.Anchor = 'Top, Bottom, Left, Right'
             $pnlList.Visible = $true
             $form.MinimumSize = New-Object System.Drawing.Size($form.Width, ($form.Height - $form.ClientSize.Height + $CollapsedH + 140))
-            $btnView.Text = '내용닫기'
+            $btnView.Text = '리스트닫기'
         } else {
             if ($script:expanded) { $script:expandedH = $form.ClientSize.Height }
             $pnlList.Visible = $false
@@ -429,7 +431,7 @@ try {
             $form.MinimumSize = $form.Size
             # 가로는 제한 없음. 0을 넣으면 Windows가 창 폭을 최소 폭으로 줄여 버리므로 화면 최대 폭을 넣음
             $form.MaximumSize = New-Object System.Drawing.Size([System.Windows.Forms.SystemInformation]::MaxWindowTrackSize.Width, $form.Height)
-            $btnView.Text = '내용보기'
+            $btnView.Text = '리스트'
         }
         $script:expanded = $open
         $form.ResumeLayout($true)
@@ -442,17 +444,6 @@ try {
     $lblStatus.ForeColor = [System.Drawing.Color]::DimGray
     [void](Add-Ctl $lblStatus 6 ($H - 24) ($W - 12) 20 'Bottom, Left, Right')
     $lblStatus.Add_TextChanged({ $tip.SetToolTip($lblStatus, $lblStatus.Text) })
-
-    # 창이 좁아 잘리는 내용은 마우스를 올리면 전체가 보이게 함
-    $script:tipIndex = -1
-    $lstOpen.Add_MouseMove({
-        param($s, $e)
-        $i = $lstOpen.IndexFromPoint($e.Location)
-        if ($i -eq $script:tipIndex) { return }
-        $script:tipIndex = $i
-        if ($i -ge 0 -and $i -lt $script:shown.Length) { $tip.SetToolTip($lstOpen, $script:shown[$i].Display) }
-        else { $tip.SetToolTip($lstOpen, '') }
-    })
 
     $script:allItems = [Collections.Generic.List[object]]::new()
     $script:shown = @()
@@ -477,18 +468,35 @@ try {
             Seq = ''; Detail = $line.Substring(4).Replace(' | ', "`r`n").Replace(' / ', "`r`n    ") }
     }
 
+    # 메모 항목은 순번이 없으므로 결재 번호 다음 번호부터 차례로 붙임
+    function Set-MemoNumber($it) {
+        $max = 0; $n = 0
+        foreach ($x in $script:allItems) { if ([int]::TryParse($x.Seq, [ref]$n) -and $n -gt $max) { $max = $n } }
+        $it.Seq = [string]($max + 1)
+        $it.Display = '[메모] ' + $it.Seq + ' | ' + $it.Text.Substring(4)
+        return $it
+    }
+
+    function Test-NumberQuery { return ($txtSearch.Text.Trim() -match '^[0-9]+$') }
+
     function Apply-Filter {
         # 찾기 칸에 숫자만 있고 그 순번의 결재 항목이 있으면 목록 대신 내용을 보여줌
         $q = $txtSearch.Text.Trim()
         $script:detailItem = $null
-        if ($q -match '^[0-9]+$') {
+        $byNumber = Test-NumberQuery
+        if ($byNumber) {
             foreach ($it in $script:allItems) { if ($it.Seq -eq $q) { $script:detailItem = $it; break } }
         }
-        $lstOpen.Visible = ($null -eq $script:detailItem)
-        $txtDetail.Visible = ($null -ne $script:detailItem)
-        if ($script:detailItem) {
-            $txtDetail.Text = '[' + $script:detailItem.Source + "]`r`n" + $script:detailItem.Detail
-            $lblList.Text = '순번 {0} 업무 내용  ·  [완료] = 완료 처리' -f $q
+        $lstOpen.Visible = -not $byNumber
+        $txtDetail.Visible = $byNumber
+        if ($byNumber) {
+            if ($script:detailItem) {
+                $txtDetail.Text = '[' + $script:detailItem.Source + '] ' + $q + "번`r`n" + $script:detailItem.Detail
+                $lblList.Text = $q + '번 업무 내용  ·  [완료] = 완료 처리'
+            } else {
+                $txtDetail.Text = $q + '번 업무가 없습니다.'
+                $lblList.Text = '번호를 확인하세요'
+            }
             return
         }
         $words = @($txtSearch.Text.Trim() -split '\s+' | Where-Object { $_ })
@@ -524,7 +532,7 @@ try {
         }
         try {
             $memo = Get-OpenTasks
-            foreach ($t in $memo) { $script:allItems.Add((New-MemoItem $t)) }
+            foreach ($t in $memo) { $script:allItems.Add((Set-MemoNumber (New-MemoItem $t))) }
             $msgs += ('메모 {0}건' -f $memo.Length)
         } catch {
             Write-ErrorLog ('메모 읽기: ' + $_.Exception.Message)
@@ -549,7 +557,7 @@ try {
             $line = New-TaskLine $content $txtOwner.Text $due $chkUrgent.Checked
             Add-Task $line
             $sw.Stop()
-            $script:allItems.Add((New-MemoItem $line))
+            $script:allItems.Add((Set-MemoNumber (New-MemoItem $line)))
             Apply-Filter
             $txtContent.Clear()
             $chkUrgent.Checked = $false
@@ -565,6 +573,7 @@ try {
         $idx = $lstOpen.SelectedIndex
         $item = $script:detailItem
         $fromDetail = ($null -ne $item)
+        if (-not $fromDetail -and (Test-NumberQuery)) { Set-Status '그 번호의 업무가 없습니다.' $true; return }
         if (-not $fromDetail) {
             if ($idx -lt 0 -or $idx -ge $script:shown.Length) { Set-Status '완료할 항목을 먼저 고르세요.' $true; return }
             $item = $script:shown[$idx]

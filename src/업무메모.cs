@@ -355,8 +355,11 @@ namespace FmjMemo
                     string name = k < head.Length && head[k].Length > 0 ? head[k] : (k + 1) + "열";
                     detail.Append(name).Append(" : ").Append(row[k].Replace(" / ", "\r\n    ")).Append("\r\n");
                 }
-                res.Items.Add(new Item { Source = "결재", Key = key, Text = text, Display = "[결재] " + text,
-                    Seq = seqCol >= 0 && seqCol < row.Length ? row[seqCol] : "", Detail = detail.ToString() });
+                // 순번 칸이 없으면 엑셀 줄 순서(1,2,3…)를 번호로 씀. 목록 앞에도 번호를 붙여 찾기 칸에 넣을 번호를 알 수 있게 함
+                string seq = seqCol >= 0 && seqCol < row.Length ? row[seqCol] : r.ToString();
+                string shownText = seqCol >= 0 ? text : seq + " | " + text;
+                res.Items.Add(new Item { Source = "결재", Key = key, Text = text, Display = "[결재] " + shownText,
+                    Seq = seq, Detail = detail.ToString() });
             }
             return res;
         }
@@ -426,7 +429,7 @@ namespace FmjMemo
 
         public MainForm()
         {
-            // 평소에는 입력칸 + 찾기 칸만 보이는 작은 창. [내용보기]를 누르거나 찾기 칸에 글자를 넣으면 목록이 펼쳐짐
+            // 평소에는 입력칸 + 찾기 칸만 보이는 창. 찾기 칸에 번호를 넣으면 그 업무 내용이, [리스트]를 누르면 전체 목록이 펼쳐짐
             const int W = 420;
             expandedH = 330 + Dy;
             var small = new Font("맑은 고딕", 8.5F);
@@ -463,7 +466,7 @@ namespace FmjMemo
 
             AddLabel("찾기", 6, 110 + Dy);
             txtSearch = new TextBox { Location = new Point(38, 107 + Dy), Size = new Size(W - 46 - 80, 23), Anchor = TLR };
-            tip.SetToolTip(txtSearch, "글자를 넣으면 맞는 업무만 목록에 나옵니다. 순번(숫자)을 넣으면 그 업무 내용이 나옵니다 (Ctrl+F, Esc = 지우기)");
+            tip.SetToolTip(txtSearch, "번호를 넣으면 그 업무 내용이 나옵니다. 글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)");
             // 찾기 칸이 비어 있으면 목록을 접고, 글자를 넣으면 펼침
             txtSearch.TextChanged += (s, e) =>
             {
@@ -472,7 +475,7 @@ namespace FmjMemo
                 if (has != expanded) SetExpanded(has);
             };
             Controls.Add(txtSearch);
-            btnView = AddButton("내용보기", W - 82, 106 + Dy, 74, 25, (s, e) => SetExpanded(!expanded));
+            btnView = AddButton("리스트", W - 82, 106 + Dy, 74, 25, (s, e) => SetExpanded(!expanded));
             btnView.Anchor = TR;
 
             // 목록 영역 (접었다 폈다 함)
@@ -485,15 +488,6 @@ namespace FmjMemo
                 Location = new Point(8, 18), Size = new Size(W - 16, ph - 18 - 34),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
             lstOpen.DoubleClick += (s, e) => DoComplete();
-            // 창이 좁아 잘리는 내용은 마우스를 올리면 전체가 보이게 함
-            int tipIndex = -1;
-            lstOpen.MouseMove += (s, e) =>
-            {
-                int i = lstOpen.IndexFromPoint(e.Location);
-                if (i == tipIndex) return;
-                tipIndex = i;
-                tip.SetToolTip(lstOpen, i >= 0 && i < shown.Count ? shown[i].Display : "");
-            };
             pnlList.Controls.Add(lstOpen);
             // 찾기 칸에 순번을 넣으면 목록 자리에 그 업무의 전체 내용을 보여줌
             txtDetail = new TextBox { Multiline = true, ReadOnly = true, WordWrap = true, ScrollBars = ScrollBars.Vertical,
@@ -544,7 +538,7 @@ namespace FmjMemo
                 pnlList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
                 pnlList.Visible = true;
                 MinimumSize = new Size(Width, Height - ClientSize.Height + CollapsedH + 140);
-                btnView.Text = "내용닫기";
+                btnView.Text = "리스트닫기";
             }
             else
             {
@@ -557,7 +551,7 @@ namespace FmjMemo
                 MinimumSize = new Size(Width, Height);
                 // 가로는 제한 없음. 0을 넣으면 Windows가 창 폭을 0(최소 폭)으로 줄여 버리므로 화면 최대 폭을 넣음
                 MaximumSize = new Size(SystemInformation.MaxWindowTrackSize.Width, Height);
-                btnView.Text = "내용보기";
+                btnView.Text = "리스트";
             }
             expanded = open;
             ResumeLayout(true);
@@ -576,17 +570,30 @@ namespace FmjMemo
             MessageBox.Show(this, what + "에 실패했습니다.\n\n" + ex.Message, "업무메모", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
+        // 메모 항목은 순번이 없으므로 결재 번호 다음 번호부터 차례로 붙임
+        Item Numbered(Item it)
+        {
+            int max = 0, n;
+            foreach (var x in allItems) if (int.TryParse(x.Seq, out n) && n > max) max = n;
+            it.Seq = (max + 1).ToString();
+            it.Display = "[메모] " + it.Seq + " | " + it.Text.Substring(4);
+            return it;
+        }
+
+        bool NumberQuery() { return Regex.IsMatch(txtSearch.Text.Trim(), "^[0-9]+$"); }
+
         void ApplyFilter()
         {
             // 찾기 칸에 숫자만 있고 그 순번의 결재 항목이 있으면 목록 대신 내용을 보여줌
             string q = txtSearch.Text.Trim();
-            detailItem = Regex.IsMatch(q, "^[0-9]+$") ? allItems.FirstOrDefault(it => it.Seq == q) : null;
-            lstOpen.Visible = detailItem == null;
-            txtDetail.Visible = detailItem != null;
-            if (detailItem != null)
+            bool byNumber = NumberQuery();
+            detailItem = byNumber ? allItems.FirstOrDefault(it => it.Seq == q) : null;
+            lstOpen.Visible = !byNumber;
+            txtDetail.Visible = byNumber;
+            if (byNumber)
             {
-                txtDetail.Text = "[" + detailItem.Source + "]\r\n" + detailItem.Detail;
-                lblList.Text = string.Format("순번 {0} 업무 내용  ·  [완료] = 완료 처리", q);
+                txtDetail.Text = detailItem != null ? "[" + detailItem.Source + "] " + q + "번\r\n" + detailItem.Detail : q + "번 업무가 없습니다.";
+                lblList.Text = detailItem != null ? q + "번 업무 내용  ·  [완료] = 완료 처리" : "번호를 확인하세요";
                 return;
             }
             var words = txtSearch.Text.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
@@ -620,7 +627,7 @@ namespace FmjMemo
             try
             {
                 var memo = Store.OpenTasks();
-                allItems.AddRange(memo.Select(Store.MemoItem));
+                foreach (var t in memo) allItems.Add(Numbered(Store.MemoItem(t)));
                 msgs.Add(string.Format("메모 {0}건", memo.Length));
             }
             catch (Exception e)
@@ -642,7 +649,7 @@ namespace FmjMemo
                 string line = Store.NewTaskLine(content, txtOwner.Text, dtDue.Checked ? (DateTime?)dtDue.Value : null, chkUrgent.Checked);
                 Store.AddTask(line);
                 sw.Stop();
-                allItems.Add(Store.MemoItem(line));
+                allItems.Add(Numbered(Store.MemoItem(line)));
                 ApplyFilter();
                 txtContent.Clear();
                 chkUrgent.Checked = false;
@@ -658,6 +665,7 @@ namespace FmjMemo
             int idx = lstOpen.SelectedIndex;
             Item it = detailItem;
             bool fromDetail = it != null;
+            if (it == null && NumberQuery()) { SetStatus("그 번호의 업무가 없습니다.", true); return; }
             if (it == null)
             {
                 if (idx < 0 || idx >= shown.Count) { SetStatus("완료할 항목을 먼저 고르세요.", true); return; }
