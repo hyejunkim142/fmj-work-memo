@@ -19,6 +19,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -418,6 +419,7 @@ namespace FmjMemo
 
         static readonly string[] Cols = { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" };
         public const string DefaultOwner = "김혜준";
+        public static string LiveNote = "";   // 열린 엑셀에 썼을 때 저장 결과 안내 (상태줄용)
 
         class Sheet
         {
@@ -660,6 +662,18 @@ namespace FmjMemo
         // 맨 아래에 새 업무 줄 추가. 돌려주는 값 = 새 No.
         public static int AddExcelRow(string path, DateTime date, string owner, DateTime? due, string content)
         {
+            try { return AddExcelRowFile(path, date, owner, due, content); }
+            catch (ExcelLockedException)
+            {
+                // 엑셀에서 열려 있으면 열린 창에 바로 씀
+                int? no = ExcelLive.AddRow(path, date, owner, due, content);
+                if (no.HasValue) return no.Value;
+                throw;
+            }
+        }
+
+        static int AddExcelRowFile(string path, DateTime date, string owner, DateTime? due, string content)
+        {
             int newNo = 0;
             EditExcel(path, sh =>
             {
@@ -700,6 +714,17 @@ namespace FmjMemo
 
         // No.로 줄을 찾아 완료 표시 (노란색 + 피드백 앞 '완료 — …' + 실마감일). 지시내용이 다르면 손대지 않고 false
         public static bool CompleteExcelRow(string path, string no, string content, DateTime when)
+        {
+            try { return CompleteExcelRowFile(path, no, content, when); }
+            catch (ExcelLockedException)
+            {
+                bool? ok = ExcelLive.CompleteRow(path, no, content, when);
+                if (ok.HasValue) return ok.Value;
+                throw;
+            }
+        }
+
+        static bool CompleteExcelRowFile(string path, string no, string content, DateTime when)
         {
             bool found = false;
             EditExcel(path, sh =>
@@ -813,6 +838,142 @@ namespace FmjMemo
         {
             return new Item { Source = "메모", Key = line, Text = line, Display = "[메모] " + line.Substring(4),
                 Detail = line.Substring(4).Replace(" | ", "\r\n").Replace(" / ", "\r\n    ") };
+        }
+    }
+
+    // 결재 엑셀이 엑셀 프로그램에서 열려 있을 때, 열린 창에 바로 써 넣고 저장함 (실시간 반영)
+    // 엑셀이 없거나 그 파일이 열려 있지 않으면 null, 엑셀이 바빠서(셀 편집 중 등) 못 쓰면 ExcelLockedException
+    public static class ExcelLive
+    {
+        const int XlNone = -4142, Yellow = 65535;   // 65535 = RGB(255,255,0)
+
+        static dynamic OpenSheet(string path, out dynamic book)
+        {
+            book = null;
+            object app;
+            try { app = Marshal.GetActiveObject("Excel.Application"); }
+            catch { return null; }
+            dynamic xl = app;
+            string full = Path.GetFullPath(path);
+            int n = xl.Workbooks.Count;
+            for (int i = 1; i <= n; i++)
+            {
+                dynamic wb = xl.Workbooks[i];
+                if (string.Equals((string)wb.FullName, full, StringComparison.OrdinalIgnoreCase))
+                {
+                    book = wb;
+                    return wb.Worksheets[1];
+                }
+            }
+            return null;
+        }
+
+        static string Text(dynamic cell)
+        {
+            object v = cell.Value2;
+            if (v == null) return "";
+            if (v is double) return ((double)v).ToString(CultureInfo.InvariantCulture);
+            return Convert.ToString(v, CultureInfo.InvariantCulture);
+        }
+
+        static Dictionary<string, int> Columns(dynamic ws)
+        {
+            var col = new Dictionary<string, int>();
+            for (int c = 1; c <= 40; c++)
+            {
+                string h = Store.Clean(Text(ws.Cells[1, c]));
+                if (h.Length > 0 && !col.ContainsKey(h)) col[h] = c;
+            }
+            string[] need = { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" };
+            var missing = need.Where(x => !col.ContainsKey(x)).ToArray();
+            if (missing.Length > 0) throw new InvalidDataException("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: " + string.Join(", ", missing));
+            return col;
+        }
+
+        // No. 칸에 값이 있는 마지막 줄 (서식만 있는 빈 줄은 건너뜀)
+        static int LastRow(dynamic ws, Dictionary<string, int> col)
+        {
+            dynamic used = ws.UsedRange;
+            int end = (int)used.Row + (int)used.Rows.Count - 1;
+            for (int r = end; r > 1; r--)
+                if (Text(ws.Cells[r, col["No."]]).Trim().Length > 0 || Text(ws.Cells[r, col["지시내용"]]).Trim().Length > 0) return r;
+            return 1;
+        }
+
+        static void Save(dynamic wb)
+        {
+            try { wb.Save(); Store.LiveNote = "열린 엑셀에 넣고 저장했습니다"; }
+            catch (Exception e)
+            {
+                Store.Log("열린 엑셀 저장 실패: " + e.Message);
+                Store.LiveNote = "열린 엑셀에 넣었지만 저장은 못 했습니다 — 엑셀에서 저장(Ctrl+S)해 주세요";
+            }
+        }
+
+        // COM 호출 중 엑셀이 바쁘면(셀 편집 중 등) 잠긴 것으로 보고 대기로 넘김
+        static T Run<T>(Func<T> f)
+        {
+            try { return f(); }
+            catch (COMException e) { Store.Log("열린 엑셀에 쓰기 실패(바쁨): " + e.Message); throw new ExcelLockedException(); }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException e) { Store.Log("열린 엑셀에 쓰기 실패: " + e.Message); throw new ExcelLockedException(); }
+        }
+
+        public static int? AddRow(string path, DateTime date, string owner, DateTime? due, string content)
+        {
+            return Run<int?>(() =>
+            {
+                dynamic wb;
+                dynamic ws = OpenSheet(path, out wb);
+                if (ws == null) return null;
+                Dictionary<string, int> col = Columns(ws);   // dynamic으로 받으면 아래 Min() 등이 안 됨
+                int last = LastRow(ws, col);
+                int maxNo = 0;
+                for (int r = 2; r <= last; r++)
+                {
+                    double d;
+                    if (double.TryParse(Text(ws.Cells[r, col["No."]]), NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d > maxNo) maxNo = (int)d;
+                }
+                int no = maxNo + 1, rn = last + 1;
+                int lo = col.Values.Min(), hi = new[] { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" }.Max(x => col[x]);
+                // 서식은 마지막 줄을 그대로 복사하고 값과 노란색은 지움
+                ws.Rows[last].Copy(ws.Rows[rn]);
+                dynamic line = ws.Range[ws.Cells[rn, lo], ws.Cells[rn, hi]];
+                line.ClearContents();
+                line.Interior.ColorIndex = XlNone;
+                ws.Cells[rn, col["No."]].Value2 = no;
+                ws.Cells[rn, col["지시일"]].Value2 = date.Date.ToOADate();
+                ws.Cells[rn, col["지시내용"]].Value2 = content.Replace("\r\n", "\n");
+                ws.Cells[rn, col["담당자"]].Value2 = owner;
+                if (due.HasValue) ws.Cells[rn, col["마감일"]].Value2 = due.Value.Date.ToOADate();
+                try { ws.Rows[rn].AutoFit(); } catch (COMException) { }
+                Save(wb);
+                return no;
+            });
+        }
+
+        public static bool? CompleteRow(string path, string no, string content, DateTime when)
+        {
+            return Run<bool?>(() =>
+            {
+                dynamic wb;
+                dynamic ws = OpenSheet(path, out wb);
+                if (ws == null) return null;
+                Dictionary<string, int> col = Columns(ws);   // dynamic으로 받으면 아래 Min() 등이 안 됨
+                int last = LastRow(ws, col), rn = -1;
+                for (int r = 2; r <= last && rn < 0; r++)
+                    if (Text(ws.Cells[r, col["No."]]).Trim() == no) rn = r;
+                if (rn < 0 || Store.Clean(Text(ws.Cells[rn, col["지시내용"]])) != content) return false;
+                int lo = col.Values.Min(), hi = new[] { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" }.Max(x => col[x]);
+                ws.Range[ws.Cells[rn, lo], ws.Cells[rn, hi]].Interior.Color = Yellow;
+                dynamic fb = ws.Cells[rn, col["피드백"]];
+                string old = Text(fb).Trim();
+                fb.Value2 = string.Format("완료 — 직접 완료 처리({0}/{1})", when.Month, when.Day) + (old.Length > 0 ? ". " + old : "");
+                dynamic done = ws.Cells[rn, col["실마감일"]];
+                done.NumberFormat = ws.Cells[rn, col["지시일"]].NumberFormat;
+                done.Value2 = when.Date.ToOADate();
+                Save(wb);
+                return true;
+            });
         }
     }
 
@@ -1112,8 +1273,10 @@ namespace FmjMemo
                 {
                     try
                     {
+                        Store.LiveNote = "";
                         int no = Store.AddExcelRow(file, DateTime.Today, owner, due, text);
                         msg = string.Format("엑셀에 저장했습니다: No.{0}  ({1}, {2})", no, Path.GetFileName(file), DateTime.Now.ToString("HH:mm:ss"));
+                        if (Store.LiveNote.Length > 0) msg += "  ·  " + Store.LiveNote;
                     }
                     catch (ExcelLockedException)
                     {
@@ -1152,6 +1315,7 @@ namespace FmjMemo
                     if (SafeFlush() > 0) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
                     else
                     {
+                        Store.LiveNote = "";
                         try { ok = Store.CompleteExcelRow(Store.LatestExcel(), it.Seq, it.Content, DateTime.Now); }
                         catch (ExcelLockedException) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
                     }
@@ -1164,7 +1328,7 @@ namespace FmjMemo
                     allItems.Remove(it);
                     ApplyFilter();
                     if (queued) SetStatus("완료 대기: No." + it.Seq + "  ·  " + PendingMsg(Store.PendingLines().Count), true);
-                    else SetStatus("엑셀에 완료 표시했습니다: No." + it.Seq + "  " + it.Content, false);
+                    else SetStatus("엑셀에 완료 표시했습니다: No." + it.Seq + (Store.LiveNote.Length > 0 ? "  ·  " + Store.LiveNote : "") + "  " + it.Content, false);
                 }
                 else if (Store.CompleteTask(it.Key))
                 {
