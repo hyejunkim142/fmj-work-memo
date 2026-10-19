@@ -80,11 +80,12 @@ namespace FmjMemo
             PendingFile = Path.Combine(dir, "엑셀반영대기.txt");
         }
 
-        // exe가 있는 폴더에 업무 파일이 있으면 거기를, 없으면 바탕화면\업무지시를 씀
+                // 바탕화면\업무지시(15:48 작업 폴더)를 먼저 씀. 다운로드 폴더 등에서 exe를 실행해도 같은 데이터를 쓰게 하려는 것
         public static string PickDir(string exeDir, string desktopDir)
         {
-            var candidates = new List<string> { exeDir };
+            var candidates = new List<string>();
             if (!string.IsNullOrEmpty(desktopDir)) candidates.Add(Path.Combine(desktopDir, "업무지시"));
+            candidates.Add(exeDir);
             foreach (var d in candidates)
             {
                 if (!Directory.Exists(d)) continue;
@@ -202,14 +203,33 @@ namespace FmjMemo
 
         // 가장 최근 결재 엑셀 = 파일 이름의 날짜(MMDD)가 가장 늦은 것 (15:48 작업과 같은 기준).
         // 같은 날짜가 여럿이면(_2 등) 나중에 저장된 것. 저장 시각으로만 고르면 예전 파일을 열어 저장했을 때 그 파일을 잘못 고름
+        // 찾는 곳: 데이터 폴더 + 바탕화면\업무지시 (15:48 작업이 쓰는 폴더)
         public static string LatestExcel()
         {
-            if (!Directory.Exists(BaseDir)) return null;
-            return Directory.GetFiles(BaseDir, ExcelMask)
+            return Newest(new[] { BaseDir, WorkDir() });
+        }
+
+        public static string DesktopDir() { return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); }
+        public static string WorkDir() { return Path.Combine(DesktopDir(), "업무지시"); }
+
+        static string Newest(IEnumerable<string> dirs)
+        {
+            return dirs.Where(d => !string.IsNullOrEmpty(d) && Directory.Exists(d))
+                .Select(d => Path.GetFullPath(d)).Distinct(StringComparer.OrdinalIgnoreCase)
+                .SelectMany(d => Directory.GetFiles(d, ExcelMask))
                 .Where(f => !Path.GetFileName(f).StartsWith("~$") && f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(f => NameDate(f))
                 .ThenByDescending(f => File.GetLastWriteTime(f))
                 .FirstOrDefault();
+        }
+
+        // 바탕화면에 바로 놓인, 지금 쓰는 파일보다 날짜가 늦은 결재 엑셀 (업무지시 폴더로 옮겨야 15:48 작업도 씀)
+        public static string StrayNewerExcel()
+        {
+            string desk = Newest(new[] { DesktopDir() });
+            if (desk == null) return null;
+            string cur = LatestExcel();
+            return cur == null || NameDate(desk) > NameDate(cur) ? desk : null;
         }
 
         static DateTime NameDate(string path)
@@ -1023,7 +1043,7 @@ namespace FmjMemo
 
     public class MainForm : Form
     {
-        public const string Version = "10/19 엑셀직접저장 4판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
+        public const string Version = "10/19 엑셀직접저장 5판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
         TextBox txtContent, txtOwner, txtSearch, txtDetail;
         DateTimePicker dtDue;
         CheckBox chkUrgent;
@@ -1254,8 +1274,38 @@ namespace FmjMemo
             return string.Format("엑셀이 열려 있어 {0}건 대기 중 — 엑셀을 닫으면 자동으로 들어갑니다", n);
         }
 
+        bool strayAsked;
+
+        // 바탕화면에 더 최신 결재 엑셀이 있으면 업무지시 폴더로 옮길지 한 번 물어봄
+        void OfferMoveStray()
+        {
+            if (strayAsked) return;
+            string stray;
+            try { stray = Store.StrayNewerExcel(); } catch { return; }
+            if (stray == null) return;
+            strayAsked = true;
+            string dir = Directory.Exists(Store.WorkDir()) ? Store.WorkDir() : Store.BaseDir;
+            string target = Path.Combine(dir, Path.GetFileName(stray));
+            var ans = MessageBox.Show(this, string.Format("바탕화면에 더 최신 업무 리스트가 있습니다.\n\n{0}\n\n입력창과 15:48 자동 작업은 '{1}' 폴더의 파일만 씁니다.\n이 파일을 그 폴더로 옮길까요?",
+                Path.GetFileName(stray), dir), "업무메모", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (ans != DialogResult.Yes) return;
+            try
+            {
+                if (File.Exists(target)) { MessageBox.Show(this, "폴더에 같은 이름 파일이 이미 있어 옮기지 않았습니다.\n\n" + target, "업무메모"); return; }
+                File.Move(stray, target);
+                SetStatus("옮겼습니다: " + Path.GetFileName(stray) + " → " + dir, false);
+            }
+            catch (IOException)
+            {
+                MessageBox.Show(this, "엑셀에서 열려 있어 옮기지 못했습니다.\n엑셀에서 그 파일을 닫은 뒤 [새로고침]을 누르면 다시 묻습니다.", "업무메모");
+                strayAsked = false;
+            }
+            catch (Exception e) { ShowFailure("파일 옮기기", e); }
+        }
+
         void RefreshList()
         {
+            OfferMoveStray();
             allItems = new List<Item>();
             var msgs = new List<string>();
             bool isErr = false;
