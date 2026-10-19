@@ -200,13 +200,27 @@ namespace FmjMemo
 
         // ---------- 결재 엑셀 (읽기 전용) ----------
 
+        // 가장 최근 결재 엑셀 = 파일 이름의 날짜(MMDD)가 가장 늦은 것 (15:48 작업과 같은 기준).
+        // 같은 날짜가 여럿이면(_2 등) 나중에 저장된 것. 저장 시각으로만 고르면 예전 파일을 열어 저장했을 때 그 파일을 잘못 고름
         public static string LatestExcel()
         {
             if (!Directory.Exists(BaseDir)) return null;
             return Directory.GetFiles(BaseDir, ExcelMask)
                 .Where(f => !Path.GetFileName(f).StartsWith("~$") && f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(f => File.GetLastWriteTime(f))
+                .OrderByDescending(f => NameDate(f))
+                .ThenByDescending(f => File.GetLastWriteTime(f))
                 .FirstOrDefault();
+        }
+
+        static DateTime NameDate(string path)
+        {
+            var m = Regex.Match(Path.GetFileNameWithoutExtension(path), @"업무지시_(\d{2})(\d{2})");
+            int mm, dd;
+            if (!m.Success || !int.TryParse(m.Groups[1].Value, out mm) || !int.TryParse(m.Groups[2].Value, out dd) || mm < 1 || mm > 12 || dd < 1 || dd > DateTime.DaysInMonth(DateTime.Today.Year, mm))
+                return DateTime.MinValue;
+            var d = new DateTime(DateTime.Today.Year, mm, dd);
+            if (d > DateTime.Today.AddDays(31)) d = d.AddYears(-1);   // 1월에 12월 파일 = 작년
+            return d;
         }
 
         const string L = "*[local-name()='{0}']";
