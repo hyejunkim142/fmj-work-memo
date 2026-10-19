@@ -5,7 +5,10 @@
 //   업무지시.txt          메모 업무. 한 줄 = 한 건. [ ] 진행중 / [v] 완료
 //   완료기록.txt          결재(엑셀) 항목 완료 기록. 시각<TAB>키<TAB>내용
 //   입력창_오류기록.txt   오류 기록
-//   결재_미마감_업무지시_*.xlsx  15:48 자동 작업이 만드는 파일. 가장 최근 파일의 첫 시트를 읽기만 함
+//   결재_미마감_업무지시_*.xlsx  15:48 자동 작업이 만드는 파일. 가장 최근 파일의 첫 시트('업무지시')를 읽고,
+//                        입력한 업무는 맨 아래 새 No.로 추가, 완료는 노란색 + 피드백 + 실마감일로 표시
+//   엑셀반영대기.txt     엑셀이 열려 있어 못 쓴 입력/완료. 엑셀이 닫히면 자동 반영 후 지워짐
+//   _백업\               엑셀을 처음 고치기 전 원본 사본 (파일마다 한 번)
 
 using System;
 using System.Collections.Generic;
@@ -38,6 +41,13 @@ namespace FmjMemo
         public string Display;
         public string Seq = "";      // 결재 엑셀의 줄 순번 (찾기 칸에 번호를 넣으면 이 값으로 찾음)
         public string Detail = "";   // 찾기 칸에 번호를 넣었을 때 보여줄 전체 내용 (여러 줄)
+        public string Content = "";  // 결재 엑셀의 지시내용 (완료 처리 때 같은 줄인지 확인용)
+    }
+
+    // 결재 엑셀을 엑셀 프로그램으로 열어 두어 쓸 수 없을 때
+    public class ExcelLockedException : Exception
+    {
+        public ExcelLockedException() : base("결재 엑셀이 엑셀에서 열려 있어 저장할 수 없습니다.") { }
     }
 
     public class ExcelResult
@@ -50,7 +60,7 @@ namespace FmjMemo
     // 파일 읽기/쓰기 (화면과 분리)
     public static class Store
     {
-        public static string BaseDir, DataFile, DoneFile, LogFile, SettingFile;
+        public static string BaseDir, DataFile, DoneFile, LogFile, SettingFile, PendingFile;
         public const string ExcelMask = "결재_미마감_업무지시_*.xlsx";
         static readonly Encoding Utf8Bom = new UTF8Encoding(true);
         public static readonly string[] Header = {
@@ -66,6 +76,7 @@ namespace FmjMemo
             DoneFile = Path.Combine(dir, "완료기록.txt");
             LogFile = Path.Combine(dir, "입력창_오류기록.txt");
             SettingFile = Path.Combine(dir, "업무메모_설정.txt");
+            PendingFile = Path.Combine(dir, "엑셀반영대기.txt");
         }
 
         // exe가 있는 폴더에 업무 파일이 있으면 거기를, 없으면 바탕화면\업무지시를 씀
@@ -209,23 +220,42 @@ namespace FmjMemo
             return doc;
         }
 
+        static List<string> SharedStrings(ZipArchive zip)
+        {
+            var strings = new List<string>();
+            var ss = LoadXml(zip, "xl/sharedStrings.xml");
+            if (ss != null)
+            {
+                foreach (XmlNode si in ss.DocumentElement.SelectNodes(P("si")))
+                {
+                    var sb = new StringBuilder();
+                    foreach (XmlNode t in si.SelectNodes(P("t") + " | " + P("r", "t"))) sb.Append(t.InnerText);
+                    strings.Add(sb.ToString());
+                }
+            }
+            return strings;
+        }
+
+        // 첫 번째 시트의 zip 안 경로
+        static string FirstSheetPath(ZipArchive zip)
+        {
+            var wb = LoadXml(zip, "xl/workbook.xml");
+            var first = (XmlElement)wb.DocumentElement.SelectSingleNode(P("sheets", "sheet"));
+            string rid = first.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
+            var rels = LoadXml(zip, "xl/_rels/workbook.xml.rels");
+            string target = null;
+            foreach (XmlElement rel in rels.DocumentElement.SelectNodes(P("Relationship")))
+                if (rel.GetAttribute("Id") == rid) { target = rel.GetAttribute("Target"); break; }
+            return target.StartsWith("/") ? target.Substring(1) : "xl/" + target;
+        }
+
         public static List<string[]> ReadXlsxRows(string path)
         {
             var rows = new List<string[]>();
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
             {
-                var strings = new List<string>();
-                var ss = LoadXml(zip, "xl/sharedStrings.xml");
-                if (ss != null)
-                {
-                    foreach (XmlNode si in ss.DocumentElement.SelectNodes(P("si")))
-                    {
-                        var sb = new StringBuilder();
-                        foreach (XmlNode t in si.SelectNodes(P("t") + " | " + P("r", "t"))) sb.Append(t.InnerText);
-                        strings.Add(sb.ToString());
-                    }
-                }
+                var strings = SharedStrings(zip);
 
                 // 날짜 서식이 걸린 칸 (엑셀은 날짜를 숫자로 저장함)
                 var isDate = new List<bool>();
@@ -253,14 +283,7 @@ namespace FmjMemo
                     }
                 }
 
-                var wb = LoadXml(zip, "xl/workbook.xml");
-                var first = (XmlElement)wb.DocumentElement.SelectSingleNode(P("sheets", "sheet"));
-                string rid = first.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
-                var rels = LoadXml(zip, "xl/_rels/workbook.xml.rels");
-                string target = null;
-                foreach (XmlElement rel in rels.DocumentElement.SelectNodes(P("Relationship")))
-                    if (rel.GetAttribute("Id") == rid) { target = rel.GetAttribute("Target"); break; }
-                string sheetPath = target.StartsWith("/") ? target.Substring(1) : "xl/" + target;
+                string sheetPath = FirstSheetPath(zip);
                 var sh = LoadXml(zip, sheetPath);
 
                 foreach (XmlElement row in sh.DocumentElement.SelectNodes(P("sheetData", "row")))
@@ -336,7 +359,11 @@ namespace FmjMemo
             var head = rows[0];
             // '번호/ID/문서/코드'가 들어간 칸이 있으면 그 칸 값으로 같은 건인지 구분, 없으면 줄 전체로 구분
             // 단, 1,2,3…처럼 줄 순번인 칸은 매일 바뀔 수 있으므로 구분 기준에서 뺌
-            int seqCol = SequenceColumn(rows);
+            int seqCol = Array.FindIndex(head, h => h.Trim().TrimEnd('.').Equals("No", StringComparison.OrdinalIgnoreCase));
+            if (seqCol < 0) seqCol = SequenceColumn(rows);
+            // 15:48 작업 규칙: 완료된 줄은 지우지 않고 실마감일을 채우고 피드백 앞에 '완료'를 적음 → 목록에서 뺌
+            int doneCol = Array.IndexOf(head, "실마감일"), fbCol = Array.IndexOf(head, "피드백"), textCol = Array.IndexOf(head, "지시내용");
+            var pendingDone = PendingDoneNos();
             int keyCol = -1;
             for (int k = 0; k < head.Length; k++)
                 if (k != seqCol && Regex.IsMatch(head[k], "번호|ID|문서|코드")) { keyCol = k; break; }
@@ -348,6 +375,9 @@ namespace FmjMemo
                 string key = string.Join(" | ", row.Where((x, i) => i != seqCol && x.Length > 0));
                 if (keyCol >= 0 && keyCol < row.Length && row[keyCol].Length > 0) key = head[keyCol] + "=" + row[keyCol];
                 if (done.Contains(key)) { res.Hidden++; continue; }
+                if (doneCol >= 0 && doneCol < row.Length && row[doneCol].Length > 0) { res.Hidden++; continue; }
+                if (fbCol >= 0 && fbCol < row.Length && row[fbCol].StartsWith("완료")) { res.Hidden++; continue; }
+                if (seqCol >= 0 && seqCol < row.Length && pendingDone.Contains(row[seqCol])) { res.Hidden++; continue; }
                 var detail = new StringBuilder();
                 for (int k = 0; k < row.Length; k++)
                 {
@@ -359,7 +389,7 @@ namespace FmjMemo
                 string seq = seqCol >= 0 && seqCol < row.Length ? row[seqCol] : r.ToString();
                 string shownText = seqCol >= 0 ? text : seq + " | " + text;
                 res.Items.Add(new Item { Source = "결재", Key = key, Text = text, Display = "[결재] " + shownText,
-                    Seq = seq, Detail = detail.ToString() });
+                    Seq = seq, Detail = detail.ToString(), Content = textCol >= 0 && textCol < row.Length ? row[textCol] : "" });
             }
             return res;
         }
@@ -383,9 +413,400 @@ namespace FmjMemo
             return -1;
         }
 
-        public static void CompleteExcel(Item it)
+        // ---------- 결재 엑셀 쓰기 ----------
+        // 엑셀 파일(zip) 안의 시트 XML만 고쳐서 다시 저장함. 엑셀이 없어도 되고, 서식·다른 시트는 그대로 둠
+
+        static readonly string[] Cols = { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" };
+        public const string DefaultOwner = "김혜준";
+
+        class Sheet
         {
-            AppendText(DoneFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\t" + it.Key + "\t" + it.Text + "\r\n");
+            public XmlDocument Doc, Styles;
+            public XmlElement Data;
+            public List<string> Strings;
+            public Dictionary<string, int> Col = new Dictionary<string, int>();
+            public string Ns;
+            public List<XmlElement> Xfs, Fills;
+            public XmlElement CellXfs, FillsNode;
+        }
+
+        static XmlDocument LoadXmlKeep(ZipArchive zip, string name)
+        {
+            var e = zip.GetEntry(name);
+            if (e == null) return null;
+            var doc = new XmlDocument { PreserveWhitespace = true };
+            using (var s = e.Open()) doc.Load(s);
+            return doc;
+        }
+
+        static void SaveXml(ZipArchive zip, string name, XmlDocument doc)
+        {
+            var old = zip.GetEntry(name);
+            if (old != null) old.Delete();
+            var e = zip.CreateEntry(name, CompressionLevel.Optimal);
+            using (var s = e.Open())
+            using (var w = XmlWriter.Create(s, new XmlWriterSettings { Encoding = new UTF8Encoding(false) }))
+                doc.Save(w);
+        }
+
+        static int ColIndex(string cellRef)
+        {
+            var m = Regex.Match(cellRef ?? "", "^([A-Z]+)");
+            int col = 0;
+            foreach (char ch in m.Groups[1].Value) col = col * 26 + (ch - 'A' + 1);
+            return col - 1;
+        }
+
+        static string ColName(int idx)
+        {
+            string name = "";
+            for (int n = idx + 1; n > 0; n = (n - 1) / 26) name = (char)('A' + (n - 1) % 26) + name;
+            return name;
+        }
+
+        static string CellText(XmlElement c, List<string> strings)
+        {
+            if (c == null) return "";
+            string t = c.GetAttribute("t");
+            var v = c.SelectSingleNode(P("v"));
+            if (t == "s") { int i; return v != null && int.TryParse(v.InnerText, out i) && i >= 0 && i < strings.Count ? strings[i] : ""; }
+            if (t == "inlineStr") { var n = c.SelectSingleNode(P("is")); return n != null ? n.InnerText : ""; }
+            return v != null ? v.InnerText : "";
+        }
+
+        static XmlElement GetCell(Sheet sh, XmlElement row, int col, bool create)
+        {
+            XmlElement after = null;
+            foreach (XmlElement c in row.SelectNodes(P("c")))
+            {
+                int k = ColIndex(c.GetAttribute("r"));
+                if (k == col) return c;
+                if (k < col) after = c;
+            }
+            if (!create) return null;
+            var cell = sh.Doc.CreateElement("c", sh.Ns);
+            cell.SetAttribute("r", ColName(col) + row.GetAttribute("r"));
+            if (after != null) row.InsertAfter(cell, after); else row.PrependChild(cell);
+            return cell;
+        }
+
+        static void ClearValue(XmlElement c)
+        {
+            c.RemoveAttribute("t");
+            while (c.HasChildNodes) c.RemoveChild(c.FirstChild);
+        }
+
+        static void SetNumber(Sheet sh, XmlElement c, double v)
+        {
+            ClearValue(c);
+            var ve = sh.Doc.CreateElement("v", sh.Ns);
+            ve.InnerText = v.ToString(CultureInfo.InvariantCulture);
+            c.AppendChild(ve);
+        }
+
+        static void SetText(Sheet sh, XmlElement c, string text)
+        {
+            ClearValue(c);
+            if (string.IsNullOrEmpty(text)) return;
+            c.SetAttribute("t", "inlineStr");
+            var isEl = sh.Doc.CreateElement("is", sh.Ns);
+            var t = sh.Doc.CreateElement("t", sh.Ns);
+            t.SetAttribute("space", "http://www.w3.org/XML/1998/namespace", "preserve");
+            t.InnerText = text.Replace("\r\n", "\n");
+            isEl.AppendChild(t);
+            c.AppendChild(isEl);
+        }
+
+        static int StyleOf(XmlElement c)
+        {
+            int s;
+            return c != null && int.TryParse(c.GetAttribute("s"), out s) ? s : 0;
+        }
+
+        static void SetStyle(XmlElement c, int s)
+        {
+            if (s > 0) c.SetAttribute("s", s.ToString()); else c.RemoveAttribute("s");
+        }
+
+        // 배경색이 칠해진 서식인지 (노란색 완료 줄 등)
+        static bool Filled(Sheet sh, int s)
+        {
+            if (sh.Xfs == null || s < 0 || s >= sh.Xfs.Count) return false;
+            int f; int.TryParse(sh.Xfs[s].GetAttribute("fillId"), out f);
+            if (f <= 0 || f >= sh.Fills.Count) return false;
+            var pf = (XmlElement)sh.Fills[f].SelectSingleNode(P("patternFill"));
+            string pt = pf != null ? pf.GetAttribute("patternType") : "";
+            return pt.Length > 0 && pt != "none" && pt != "gray125";
+        }
+
+        static int YellowFill(Sheet sh)
+        {
+            for (int i = 0; i < sh.Fills.Count; i++)
+            {
+                var fg = (XmlElement)sh.Fills[i].SelectSingleNode(P("patternFill", "fgColor"));
+                var pf = (XmlElement)sh.Fills[i].SelectSingleNode(P("patternFill"));
+                if (fg != null && pf.GetAttribute("patternType") == "solid" && fg.GetAttribute("rgb").ToUpperInvariant().EndsWith("FFFF00")) return i;
+            }
+            var st = sh.Styles;
+            string ns = st.DocumentElement.NamespaceURI;
+            var fill = st.CreateElement("fill", ns);
+            var p = st.CreateElement("patternFill", ns); p.SetAttribute("patternType", "solid");
+            var fgc = st.CreateElement("fgColor", ns); fgc.SetAttribute("rgb", "FFFFFF00");
+            var bgc = st.CreateElement("bgColor", ns); bgc.SetAttribute("indexed", "64");
+            p.AppendChild(fgc); p.AppendChild(bgc); fill.AppendChild(p);
+            sh.FillsNode.AppendChild(fill); sh.Fills.Add(fill);
+            sh.FillsNode.SetAttribute("count", sh.Fills.Count.ToString());
+            return sh.Fills.Count - 1;
+        }
+
+        static bool SameXf(XmlElement a, XmlElement b)
+        {
+            if (a.Attributes.Count != b.Attributes.Count || a.InnerXml != b.InnerXml) return false;
+            foreach (XmlAttribute at in a.Attributes) if (b.GetAttribute(at.Name) != at.Value) return false;
+            return true;
+        }
+
+        // 서식 s와 같고 배경만 fillId인 서식 번호 (없으면 새로 만듦)
+        static int WithFill(Sheet sh, int s, int fillId)
+        {
+            if (sh.Xfs == null || s < 0 || s >= sh.Xfs.Count) return s;
+            var x = (XmlElement)sh.Xfs[s].CloneNode(true);
+            x.SetAttribute("fillId", fillId.ToString());
+            if (fillId > 0) x.SetAttribute("applyFill", "1"); else x.RemoveAttribute("applyFill");
+            for (int i = 0; i < sh.Xfs.Count; i++) if (SameXf(sh.Xfs[i], x)) return i;
+            sh.CellXfs.AppendChild(x); sh.Xfs.Add(x);
+            sh.CellXfs.SetAttribute("count", sh.Xfs.Count.ToString());
+            return sh.Xfs.Count - 1;
+        }
+
+        static void Backup(string path)
+        {
+            string dir = Path.Combine(BaseDir, "_백업");
+            Directory.CreateDirectory(dir);
+            string b = Path.Combine(dir, Path.GetFileNameWithoutExtension(path) + "_수정전.xlsx");
+            if (!File.Exists(b)) File.Copy(path, b);
+        }
+
+        // 엑셀 파일을 열어 edit로 고친 뒤 저장. edit가 false를 돌려주면 저장하지 않음
+        static void EditExcel(string path, Func<Sheet, bool> edit)
+        {
+            byte[] bytes;
+            try
+            {
+                // 엑셀이 파일을 열고 있으면 여기서 막힘
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    bytes = new byte[fs.Length];
+                    int off = 0, n;
+                    while (off < bytes.Length && (n = fs.Read(bytes, off, bytes.Length - off)) > 0) off += n;
+                }
+            }
+            catch (IOException) { throw new ExcelLockedException(); }
+
+            var ms = new MemoryStream();
+            ms.Write(bytes, 0, bytes.Length);
+            ms.Position = 0;
+            using (var zip = new ZipArchive(ms, ZipArchiveMode.Update, true))
+            {
+                string sheetPath = FirstSheetPath(zip);
+                var sh = new Sheet { Doc = LoadXmlKeep(zip, sheetPath), Styles = LoadXmlKeep(zip, "xl/styles.xml"), Strings = SharedStrings(zip) };
+                sh.Ns = sh.Doc.DocumentElement.NamespaceURI;
+                sh.Data = (XmlElement)sh.Doc.DocumentElement.SelectSingleNode(P("sheetData"));
+                if (sh.Styles != null)
+                {
+                    sh.CellXfs = (XmlElement)sh.Styles.DocumentElement.SelectSingleNode(P("cellXfs"));
+                    sh.FillsNode = (XmlElement)sh.Styles.DocumentElement.SelectSingleNode(P("fills"));
+                    if (sh.CellXfs != null && sh.FillsNode != null)
+                    {
+                        sh.Xfs = sh.CellXfs.SelectNodes(P("xf")).Cast<XmlElement>().ToList();
+                        sh.Fills = sh.FillsNode.SelectNodes(P("fill")).Cast<XmlElement>().ToList();
+                    }
+                }
+                var head = sh.Data.SelectSingleNode(P("row")) as XmlElement;
+                if (head != null)
+                    foreach (XmlElement c in head.SelectNodes(P("c"))) sh.Col[Clean(CellText(c, sh.Strings))] = ColIndex(c.GetAttribute("r"));
+                var missing = Cols.Where(x => !sh.Col.ContainsKey(x)).ToArray();
+                if (missing.Length > 0) throw new InvalidDataException("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: " + string.Join(", ", missing));
+
+                if (!edit(sh)) return;
+                SaveXml(zip, sheetPath, sh.Doc);
+                if (sh.Xfs != null) SaveXml(zip, "xl/styles.xml", sh.Styles);
+            }
+
+            Backup(path);
+            string tmp = Path.Combine(Path.GetDirectoryName(path), "~업무메모_" + Guid.NewGuid().ToString("N") + ".tmp");
+            File.WriteAllBytes(tmp, ms.ToArray());
+            try { Retry(() => File.Copy(tmp, path, true)); }
+            catch (IOException) { throw new ExcelLockedException(); }
+            catch (UnauthorizedAccessException) { throw new ExcelLockedException(); }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
+
+        static List<XmlElement> DataRows(Sheet sh)
+        {
+            return sh.Data.SelectNodes(P("row")).Cast<XmlElement>().Skip(1).ToList();
+        }
+
+        // dimension / autoFilter 범위의 끝 줄을 늘림
+        static void ExtendRefs(Sheet sh, int lastRow)
+        {
+            foreach (XmlElement e in sh.Doc.DocumentElement.SelectNodes(P("dimension") + " | " + P("autoFilter")))
+            {
+                var m = Regex.Match(e.GetAttribute("ref"), @"^([A-Z]+\d+:[A-Z]+)(\d+)$");
+                if (m.Success && int.Parse(m.Groups[2].Value) < lastRow) e.SetAttribute("ref", m.Groups[1].Value + lastRow);
+            }
+        }
+
+        // 맨 아래에 새 업무 줄 추가. 돌려주는 값 = 새 No.
+        public static int AddExcelRow(string path, DateTime date, string owner, DateTime? due, string content)
+        {
+            int newNo = 0;
+            EditExcel(path, sh =>
+            {
+                var rows = sh.Data.SelectNodes(P("row")).Cast<XmlElement>().ToList();
+                var last = rows[rows.Count - 1];
+                int lastR;
+                if (!int.TryParse(last.GetAttribute("r"), out lastR)) lastR = rows.Count;
+                int maxNo = 0;
+                foreach (var r in DataRows(sh))
+                {
+                    double d;
+                    if (double.TryParse(CellText(GetCell(sh, r, sh.Col["No."], false), sh.Strings), NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d > maxNo) maxNo = (int)d;
+                }
+                newNo = maxNo + 1;
+                int rn = lastR + 1;
+
+                var row = sh.Doc.CreateElement("row", sh.Ns);
+                row.SetAttribute("r", rn.ToString());
+                if (last.HasAttribute("spans")) row.SetAttribute("spans", last.GetAttribute("spans"));
+                sh.Data.AppendChild(row);
+                foreach (int col in Cols.Select(x => sh.Col[x]).OrderBy(x => x))
+                {
+                    var c = GetCell(sh, row, col, true);
+                    // 서식은 마지막 줄을 따르되, 완료 줄의 노란색은 빼고 씀
+                    int st = StyleOf(GetCell(sh, last, col, false));
+                    SetStyle(c, Filled(sh, st) ? WithFill(sh, st, 0) : st);
+                }
+                SetNumber(sh, GetCell(sh, row, sh.Col["No."], false), newNo);
+                SetNumber(sh, GetCell(sh, row, sh.Col["지시일"], false), date.Date.ToOADate());
+                SetText(sh, GetCell(sh, row, sh.Col["지시내용"], false), content);
+                SetText(sh, GetCell(sh, row, sh.Col["담당자"], false), owner);
+                if (due.HasValue) SetNumber(sh, GetCell(sh, row, sh.Col["마감일"], false), due.Value.Date.ToOADate());
+                ExtendRefs(sh, rn);
+                return true;
+            });
+            return newNo;
+        }
+
+        // No.로 줄을 찾아 완료 표시 (노란색 + 피드백 앞 '완료 — …' + 실마감일). 지시내용이 다르면 손대지 않고 false
+        public static bool CompleteExcelRow(string path, string no, string content, DateTime when)
+        {
+            bool found = false;
+            EditExcel(path, sh =>
+            {
+                var row = DataRows(sh).FirstOrDefault(r => CellText(GetCell(sh, r, sh.Col["No."], false), sh.Strings).Trim() == no);
+                if (row == null) return false;
+                if (Clean(CellText(GetCell(sh, row, sh.Col["지시내용"], false), sh.Strings)) != content) return false;
+                int yellow = sh.Xfs != null ? YellowFill(sh) : 0;
+                int dateStyle = StyleOf(GetCell(sh, row, sh.Col["지시일"], false));   // 실마감일도 날짜 서식으로
+                int lo = Cols.Min(x => sh.Col[x]), hi = Cols.Max(x => sh.Col[x]);
+                for (int col = lo; col <= hi; col++)
+                {
+                    var c = GetCell(sh, row, col, true);
+                    int st = col == sh.Col["실마감일"] ? dateStyle : StyleOf(c);
+                    SetStyle(c, sh.Xfs != null ? WithFill(sh, st, yellow) : st);
+                }
+                var fb = GetCell(sh, row, sh.Col["피드백"], false);
+                string old = CellText(fb, sh.Strings).Trim();
+                SetText(sh, fb, string.Format("완료 — 직접 완료 처리({0}/{1})", when.Month, when.Day) + (old.Length > 0 ? ". " + old : ""));
+                SetNumber(sh, GetCell(sh, row, sh.Col["실마감일"], false), when.Date.ToOADate());
+                found = true;
+                return true;
+            });
+            return found;
+        }
+
+        // ---------- 엑셀 반영 대기 (엑셀이 열려 있을 때) ----------
+        // 한 줄 = 한 건.  ADD<TAB>지시일<TAB>담당<TAB>마감(-)<TAB>내용   /   DONE<TAB>No<TAB>완료일<TAB>지시내용
+
+        static string Esc(string s) { return (s ?? "").Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r\n", "\n").Replace("\n", "\\n"); }
+
+        static string Unesc(string s)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (s[i] == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[++i];
+                    sb.Append(n == 'n' ? '\n' : n == 't' ? '\t' : n);
+                }
+                else sb.Append(s[i]);
+            }
+            return sb.ToString();
+        }
+
+        static DateTime Day(string s) { return DateTime.ParseExact(s, "yyyy-MM-dd", CultureInfo.InvariantCulture); }
+
+        public static List<string> PendingLines()
+        {
+            return File.Exists(PendingFile) ? ReadAllLinesShared(PendingFile).Where(l => l.Trim().Length > 0).ToList() : new List<string>();
+        }
+
+        static void SavePending(List<string> lines)
+        {
+            if (lines.Count == 0) { if (File.Exists(PendingFile)) Retry(() => File.Delete(PendingFile)); return; }
+            string tmp = PendingFile + ".tmp";
+            File.WriteAllLines(tmp, lines, Utf8Bom);
+            Retry(() => { File.Copy(tmp, PendingFile, true); File.Delete(tmp); });
+        }
+
+        public static void QueueAdd(DateTime date, string owner, DateTime? due, string content)
+        {
+            AppendText(PendingFile, string.Join("\t", "ADD", date.ToString("yyyy-MM-dd"), Esc(owner), due.HasValue ? due.Value.ToString("yyyy-MM-dd") : "-", Esc(content)) + "\r\n");
+        }
+
+        public static void QueueDone(string no, string content, DateTime when)
+        {
+            AppendText(PendingFile, string.Join("\t", "DONE", no, when.ToString("yyyy-MM-dd"), Esc(content)) + "\r\n");
+        }
+
+        public static HashSet<string> PendingDoneNos()
+        {
+            return new HashSet<string>(PendingLines().Select(l => l.Split('\t')).Where(p => p[0] == "DONE" && p.Length > 1).Select(p => p[1]));
+        }
+
+        // 대기 중인 건을 엑셀에 반영. 돌려주는 값 = 아직 남은 건수 (엑셀이 아직 열려 있으면 그대로 남음)
+        public static int FlushPending()
+        {
+            var lines = PendingLines();
+            if (lines.Count == 0) return 0;
+            string file = LatestExcel();
+            if (file == null) return lines.Count;
+            int i = 0;
+            try
+            {
+                for (; i < lines.Count; i++)
+                {
+                    var p = lines[i].Split('\t');
+                    if (p[0] == "ADD" && p.Length >= 5)
+                        AddExcelRow(file, Day(p[1]), Unesc(p[2]), p[3] == "-" ? (DateTime?)null : Day(p[3]), Unesc(p[4]));
+                    else if (p[0] == "DONE" && p.Length >= 4)
+                    {
+                        if (!CompleteExcelRow(file, p[1], Unesc(p[3]), Day(p[2])))
+                            Log("대기 중이던 완료 처리를 엑셀에서 찾지 못함: No." + p[1] + " " + Unesc(p[3]));
+                    }
+                    else Log("엑셀 반영 대기 파일의 알 수 없는 줄: " + lines[i]);
+                }
+            }
+            catch (ExcelLockedException) { }
+            finally
+            {
+                // 반영된 줄만 지움 (중간에 다른 오류가 나도 이미 넣은 건이 두 번 들어가지 않게)
+                lines.RemoveRange(0, i);
+                SavePending(lines);
+            }
+            return lines.Count;
         }
 
         public static Item MemoItem(string line)
@@ -447,7 +868,7 @@ namespace FmjMemo
             var TR = AnchorStyles.Top | AnchorStyles.Right;
             var BL = AnchorStyles.Bottom | AnchorStyles.Left;
 
-            var lbHint = AddLabel("업무 내용  (Ctrl+Enter = 저장)", 6, 6);
+            var lbHint = AddLabel("업무 내용  (Ctrl+Enter = 결재 엑셀에 저장, 담당 비우면 " + Store.DefaultOwner + ")", 6, 6);
             lbHint.Font = small; lbHint.ForeColor = Color.DimGray;
             txtContent = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, AcceptsReturn = true,
                 Location = new Point(8, 24), Size = new Size(W - 16, 44 + Dy), Anchor = TLR };
@@ -522,6 +943,10 @@ namespace FmjMemo
                 Activate();
                 BeginInvoke(new Action(Program.OfferShortcut));
             };
+            // 엑셀이 열려 있어 밀린 건이 있으면 30초마다 다시 넣어 봄
+            var timer = new System.Windows.Forms.Timer { Interval = 30000 };
+            timer.Tick += (s, e) => { if (Store.PendingLines().Count > 0) RefreshList(); };
+            timer.Start();
         }
 
         // 목록 펼치기/접기. 접으면 세로 크기를 고정하고, 펴면 마지막으로 쓰던 높이로 돌아감
@@ -607,11 +1032,28 @@ namespace FmjMemo
                 : string.Format("진행중 {0}건  ·  더블클릭 = 완료", allItems.Count);
         }
 
+        // 엑셀이 열려 있어 미뤄 둔 건을 반영해 봄. 돌려주는 값 = 남은 건수
+        int SafeFlush()
+        {
+            try { return Store.FlushPending(); }
+            catch (Exception e)
+            {
+                Store.Log("엑셀 반영 대기 처리: " + e.Message);
+                return Store.PendingLines().Count;
+            }
+        }
+
+        string PendingMsg(int n)
+        {
+            return string.Format("엑셀이 열려 있어 {0}건 대기 중 — 엑셀을 닫으면 자동으로 들어갑니다", n);
+        }
+
         void RefreshList()
         {
             allItems = new List<Item>();
             var msgs = new List<string>();
             bool isErr = false;
+            int pending = SafeFlush();
             try
             {
                 var ex = Store.ExcelItems();
@@ -635,6 +1077,7 @@ namespace FmjMemo
                 Store.Log("메모 읽기: " + e.Message);
                 msgs.Add("메모 읽기 실패"); isErr = true;
             }
+            if (pending > 0) { msgs.Insert(0, PendingMsg(pending)); isErr = true; }
             ApplyFilter();
             SetStatus(string.Join("  ·  ", msgs), isErr);
         }
@@ -643,18 +1086,48 @@ namespace FmjMemo
         {
             string content = txtContent.Text.Trim();
             if (content.Length == 0) { SetStatus("업무 내용을 입력하세요.", true); txtContent.Focus(); return; }
+            string owner = txtOwner.Text.Trim();
+            if (owner.Length == 0) owner = Store.DefaultOwner;
+            DateTime? due = dtDue.Checked ? (DateTime?)dtDue.Value.Date : null;
+            string text = chkUrgent.Checked ? "[긴급] " + content : content;
             try
             {
-                var sw = Stopwatch.StartNew();
-                string line = Store.NewTaskLine(content, txtOwner.Text, dtDue.Checked ? (DateTime?)dtDue.Value : null, chkUrgent.Checked);
-                Store.AddTask(line);
-                sw.Stop();
-                allItems.Add(Numbered(Store.MemoItem(line)));
-                ApplyFilter();
+                string msg; bool queued = false;
+                string file = Store.LatestExcel();
+                if (file == null)
+                {
+                    // 결재 엑셀이 없으면 예전처럼 업무지시.txt에 저장
+                    string line = Store.NewTaskLine(content, owner, due, chkUrgent.Checked);
+                    Store.AddTask(line);
+                    msg = "결재 엑셀이 없어 업무지시.txt에 저장했습니다.";
+                    queued = true;
+                }
+                else if (SafeFlush() > 0)
+                {
+                    Store.QueueAdd(DateTime.Today, owner, due, text);   // 앞에 밀린 건이 있으면 순서를 지키려고 뒤에 붙임
+                    queued = true;
+                    msg = PendingMsg(Store.PendingLines().Count);
+                }
+                else
+                {
+                    try
+                    {
+                        int no = Store.AddExcelRow(file, DateTime.Today, owner, due, text);
+                        msg = string.Format("엑셀에 저장했습니다: No.{0}  ({1}, {2})", no, Path.GetFileName(file), DateTime.Now.ToString("HH:mm:ss"));
+                    }
+                    catch (ExcelLockedException)
+                    {
+                        Store.QueueAdd(DateTime.Today, owner, due, text);
+                        queued = true;
+                        msg = PendingMsg(Store.PendingLines().Count);
+                    }
+                }
+                RefreshList();
+                SetStatus(msg, queued);
                 txtContent.Clear();
+                txtOwner.Clear();
                 chkUrgent.Checked = false;
                 dtDue.Checked = false;
-                SetStatus(string.Format("저장했습니다. ({0}, {1:N2}초)", DateTime.Now.ToString("HH:mm:ss"), sw.Elapsed.TotalSeconds), false);
                 txtContent.Focus();
             }
             catch (Exception e) { ShowFailure("저장", e); }
@@ -675,10 +1148,23 @@ namespace FmjMemo
             {
                 if (it.Source == "결재")
                 {
-                    Store.CompleteExcel(it);
+                    bool queued = false, ok = true;
+                    if (SafeFlush() > 0) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
+                    else
+                    {
+                        try { ok = Store.CompleteExcelRow(Store.LatestExcel(), it.Seq, it.Content, DateTime.Now); }
+                        catch (ExcelLockedException) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
+                    }
+                    if (!ok)
+                    {
+                        RefreshList();
+                        SetStatus(string.Format("최신 엑셀에서 No.{0} 줄을 찾지 못했습니다(내용이 바뀜). 목록을 새로 불러왔습니다.", it.Seq), true);
+                        return;
+                    }
                     allItems.Remove(it);
                     ApplyFilter();
-                    SetStatus("완료 처리했습니다: " + it.Text, false);
+                    if (queued) SetStatus("완료 대기: No." + it.Seq + "  ·  " + PendingMsg(Store.PendingLines().Count), true);
+                    else SetStatus("엑셀에 완료 표시했습니다: No." + it.Seq + "  " + it.Content, false);
                 }
                 else if (Store.CompleteTask(it.Key))
                 {
