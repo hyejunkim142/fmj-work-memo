@@ -460,8 +460,10 @@ namespace FmjMemo
         {
             var missing = Cols.Where(x => !col.ContainsKey(x)).ToArray();
             if (missing.Length == 0) return;
-            throw new InvalidDataException(string.Format("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: {0}\n\n파일: {1}\n첫 줄 제목: {2}",
-                string.Join(", ", missing), Path.GetFileName(path), found.Count > 0 ? string.Join(" | ", found.Where(x => x.Length > 0)) : "(비어 있음)"));
+            throw new InvalidDataException(string.Format("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: {0}\n\n파일: {1}\n폴더: {2}\n첫 줄 제목: {3}\n\n" +
+                "최신 업무 리스트 엑셀(No. 칸이 있는 것)을 이 폴더에 넣어 주세요. 입력창은 이 폴더에서 파일 이름 날짜가 가장 늦은 파일을 씁니다.",
+                string.Join(", ", missing), Path.GetFileName(path), Path.GetDirectoryName(path),
+                found.Count > 0 ? string.Join(" | ", found.Where(x => x.Length > 0)) : "(비어 있음)"));
         }
 
         static XmlDocument LoadXmlKeep(ZipArchive zip, string name)
@@ -1021,7 +1023,7 @@ namespace FmjMemo
 
     public class MainForm : Form
     {
-        public const string Version = "10/19 엑셀직접저장 3판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
+        public const string Version = "10/19 엑셀직접저장 4판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
         TextBox txtContent, txtOwner, txtSearch, txtDetail;
         DateTimePicker dtDue;
         CheckBox chkUrgent;
