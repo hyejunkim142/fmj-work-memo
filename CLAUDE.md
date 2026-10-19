@@ -27,7 +27,9 @@
 - 저장: 맨 아래에 새 줄. No.=가장 큰 No.+1, 지시일=오늘, 담당자 비우면 '김혜준', [긴급] 체크 시 내용 앞에 '[긴급] ', 줄바꿈은 셀 안 줄바꿈 그대로. 서식은 마지막 줄을 따르되 노란색은 뺌
 - 완료: No.로 줄을 찾고 지시내용이 같은지 확인 → A~G 노란색(FFFF00), 피드백 맨 앞 '완료 — 직접 완료 처리(M/D)', 실마감일=오늘 (15:48 작업 규칙과 같음). 내용이 다르면 손대지 않음
 - 목록: 실마감일이 있거나 피드백이 '완료'로 시작하는 줄은 숨김. 번호 = No. 칸
-- 쓰는 방식: zip 안 시트 XML·styles.xml만 고쳐 임시 파일 → 덮어쓰기. 엑셀에서 열려 있으면(FileShare.None 실패) 대기 파일로
+- 쓰는 방식: zip 안 시트 XML·styles.xml만 고쳐 임시 파일 → 덮어쓰기
+- 엑셀에서 열려 있으면(FileShare.None 실패) **열린 엑셀 창에 직접 씀**(COM, `ExcelLive`: Marshal.GetActiveObject → 같은 경로 통합문서 첫 시트 → 값 입력 → wb.Save()). 저장 때 사용자가 엑셀에서 고치던 다른 내용도 같이 저장됨. 엑셀이 바쁘면(셀 편집 중) 대기 파일로 → 30초마다 재시도
+- COM 부분은 리눅스에서 시험 불가 (Windows 실제 시험 필요)
 - 결재 엑셀이 아예 없으면 예전처럼 업무지시.txt에 저장
 - 주의: 15:48 작업이 엑셀을 읽은 뒤 새 파일을 저장하기 전 몇 분 사이에 넣은 건은 다음 날 파일에 빠질 수 있음
 - task_input.ps1은 이 기능이 없음 (예전처럼 txt 저장, 완료 줄도 목록에 나옴)
@@ -44,7 +46,7 @@
 - 오류는 메시지 창 + 오류기록 파일에 남김. 중복 실행 방지
 
 ## 빌드 (exe 다시 만들기)
-- Windows: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32icon:업무메모.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.IO.Compression.dll /out:업무메모.exe _소스\업무메모.cs`
+- Windows: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32icon:업무메모.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.IO.Compression.dll /r:Microsoft.CSharp.dll /out:업무메모.exe _소스\업무메모.cs`
 - C# 7.3 문법까지만 사용 (Windows 기본 csc는 C# 5까지라 위 명령이 실패하면 Claude Code에 빌드 요청)
 - exe가 데이터 폴더 고르는 규칙: exe 폴더에 업무지시.txt / task_input.ps1 / 결재 엑셀 중 하나라도 있으면 exe 폴더, 아니면 바탕화면\업무지시
 - exe와 ps1은 같은 이름의 중복 실행 방지 장치를 써서 동시에 못 켬
@@ -65,6 +67,7 @@
 - 같은 날 창을 420x460으로 키움. Windows에서 창이 아주 좁게 뜨던 버그 수정 (접을 때 MaximumSize 가로를 0으로 넣어서 Windows가 폭을 최소로 줄였음. mono에서는 재현 안 됨)
 - 같은 날 실제 엑셀(1008)에 순번 칸이 없어 번호 찾기가 안 되던 문제 → 줄 순서를 번호로 씀. [내용보기] → [리스트], 마우스 미리보기 제거, 숫자 찾기는 목록 대신 내용만
 - 같은 날 입력·완료를 결재 엑셀에 직접 쓰도록 변경 (사용자 결정: HTML 대신 엑셀 직접, 열려 있으면 대기 후 자동 반영, 완료=노란색+실마감일+피드백, 담당 기본 김혜준). 실제 1016 엑셀 사본으로 mono에서 저장·완료·잠김 대기 시험, openpyxl·LibreOffice로 열림 확인
+- 같은 날 사용자 PC가 예전 exe로 실행 중이어서 txt에 저장되던 것 확인. 열린 엑셀에 실시간으로 쓰기(COM) 추가
 - 2026-10-19 15:48 예약 작업 지시문에 입력창 줄 보존 규칙 추가 완료 (사용자가 PC Cowork에서 승인, 클라우드에서는 기기 승인이 없어 못 바꿈). 문구: docs/15시48분_작업_추가문구.txt. build.py가 실제로 줄·서식을 그대로 옮기는지는 미확인
 - **Windows 실제 화면 시험 필요** (창 배치, 한글 표시, 메모장 열기)
 - 15:48 자동 갱신 작업이 이 폴더 파일을 읽는다면 새 형식에 맞는지 확인 필요
