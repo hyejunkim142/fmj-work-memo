@@ -1068,7 +1068,7 @@ namespace FmjMemo
 
     public class MainForm : Form
     {
-        public const string Version = "10/19 피드백 6판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
+        public const string Version = "10/19 엑셀버튼 7판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
         TextBox txtContent, txtOwner, txtSearch, txtDetail;
         DateTimePicker dtDue;
         CheckBox chkUrgent;
@@ -1137,7 +1137,7 @@ namespace FmjMemo
             AddButton("저장", W - 68, 74 + Dy, 60, 25, (s, e) => DoSave()).Anchor = TR;
 
             AddLabel("찾기", 6, 110 + Dy);
-            txtSearch = new TextBox { Location = new Point(38, 107 + Dy), Size = new Size(W - 46 - 80, 23), Anchor = TLR };
+            txtSearch = new TextBox { Location = new Point(38, 107 + Dy), Size = new Size(W - 46 - 80 - 62, 23), Anchor = TLR };
             tip.SetToolTip(txtSearch, "번호를 넣으면 그 업무 내용이 나옵니다. 글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)");
             // 찾기 칸이 비어 있으면 목록을 접고, 글자를 넣으면 펼침
             txtSearch.TextChanged += (s, e) =>
@@ -1149,6 +1149,9 @@ namespace FmjMemo
             Controls.Add(txtSearch);
             btnView = AddButton("리스트", W - 82, 106 + Dy, 74, 25, (s, e) => SetExpanded(!expanded));
             btnView.Anchor = TR;
+            var btnExcel = AddButton("엑셀", W - 82 - 62, 106 + Dy, 58, 25, (s, e) => OpenExcel());
+            btnExcel.Anchor = TR;
+            tip.SetToolTip(btnExcel, "입력창이 쓰는 결재 엑셀(가장 최근 파일)을 엽니다");
 
             // 목록 영역 (접었다 폈다 함)
             pnlList = new Panel { Location = new Point(0, TopH), Size = new Size(W, expandedH - TopH - StatusH), Anchor = TLR, Visible = false };
@@ -1524,6 +1527,19 @@ namespace FmjMemo
                 Process.Start("notepad.exe", "\"" + Store.DataFile + "\"");
             }
             catch (Exception e) { ShowFailure("메모장 열기", e); }
+        }
+
+        // 입력창이 쓰는 결재 엑셀을 엶 (이미 열려 있으면 엑셀이 그 창을 앞으로 가져옴)
+        void OpenExcel()
+        {
+            try
+            {
+                string file = Store.LatestExcel();
+                if (file == null) { SetStatus("결재 엑셀 파일이 없습니다.", true); return; }
+                Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                SetStatus("엑셀을 엽니다: " + Path.GetFileName(file), false);
+            }
+            catch (Exception e) { ShowFailure("엑셀 열기", e); }
         }
 
         void OpenFolder()
