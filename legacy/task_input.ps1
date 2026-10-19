@@ -268,7 +268,14 @@ function Get-ExcelItems {
                 $key = (@($keyParts) -join ' | ')
                 if ($keyCol -ge 0 -and $keyCol -lt $row.Length -and $row[$keyCol]) { $key = $head[$keyCol] + '=' + $row[$keyCol] }
                 if ($done.Contains($key)) { $hidden++; continue }
-                $items.Add([pscustomobject]@{ Source = '결재'; Key = $key; Text = $text; Display = '[결재] ' + $text })
+                $detail = for ($k = 0; $k -lt $row.Length; $k++) {
+                    if (-not $row[$k]) { continue }
+                    $name = if ($k -lt $head.Length -and $head[$k]) { $head[$k] } else { '{0}열' -f ($k + 1) }
+                    $name + ' : ' + $row[$k].Replace(' / ', "`r`n    ")
+                }
+                $seq = if ($seqCol -ge 0 -and $seqCol -lt $row.Length) { [string]$row[$seqCol] } else { '' }
+                $items.Add([pscustomobject]@{ Source = '결재'; Key = $key; Text = $text; Display = '[결재] ' + $text
+                    Seq = $seq; Detail = (@($detail) -join "`r`n") })
             }
         }
     }
@@ -298,8 +305,10 @@ if (-not $createdNew) {
 try {
     if (-not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir | Out-Null }
 
-    # 작은 창 (가로 350 x 세로 330). 테두리를 끌어서 크기를 늘릴 수 있음
-    $W = 350; $H = 330
+    # 작은 창 (가로 350 x 세로 374). 테두리를 끌어서 크기를 늘릴 수 있음
+    # $Dy = 업무 내용 칸을 기본(44)보다 키운 만큼 아래 칸들이 내려감
+    $Dy = 44
+    $W = 350; $H = 330 + $Dy
     $small = New-Object System.Drawing.Font('맑은 고딕', 8.5)
     $form = New-Object System.Windows.Forms.Form
     $form.Text = '업무지시 입력'
@@ -336,35 +345,35 @@ try {
     $txtContent.Multiline = $true
     $txtContent.ScrollBars = 'Vertical'
     $txtContent.AcceptsReturn = $true
-    [void](Add-Ctl $txtContent 8 24 ($W - 16) 44 'Top, Left, Right')
+    [void](Add-Ctl $txtContent 8 24 ($W - 16) (44 + $Dy) 'Top, Left, Right')
 
-    [void](Add-Ctl (New-Label '담당' $false) 6 78 0 0 '')
+    [void](Add-Ctl (New-Label '담당' $false) 6 (78 + $Dy) 0 0 '')
     $txtOwner = New-Object System.Windows.Forms.TextBox
-    [void](Add-Ctl $txtOwner 38 75 62 23 'Top, Left')
+    [void](Add-Ctl $txtOwner 38 (75 + $Dy) 62 23 'Top, Left')
 
     $dtDue = New-Object System.Windows.Forms.DateTimePicker
     $dtDue.Format = 'Custom'
     $dtDue.CustomFormat = 'MM-dd (ddd)'
     $dtDue.ShowCheckBox = $true
     $dtDue.Checked = $false
-    [void](Add-Ctl $dtDue 104 75 112 23 'Top, Left')
+    [void](Add-Ctl $dtDue 104 (75 + $Dy) 112 23 'Top, Left')
     $tip.SetToolTip($dtDue, '마감일 (체크해야 저장됨)')
 
     $chkUrgent = New-Object System.Windows.Forms.CheckBox
     $chkUrgent.Text = '긴급'
     $chkUrgent.AutoSize = $true
-    [void](Add-Ctl $chkUrgent 222 77 0 0 'Top, Left')
+    [void](Add-Ctl $chkUrgent 222 (77 + $Dy) 0 0 'Top, Left')
 
-    $btnSave = Add-Ctl (New-Button '저장') ($W - 68) 74 60 25 'Top, Right'
+    $btnSave = Add-Ctl (New-Button '저장') ($W - 68) (74 + $Dy) 60 25 'Top, Right'
 
-    [void](Add-Ctl (New-Label '찾기' $false) 6 110 0 0 '')
+    [void](Add-Ctl (New-Label '찾기' $false) 6 (110 + $Dy) 0 0 '')
     $txtSearch = New-Object System.Windows.Forms.TextBox
-    [void](Add-Ctl $txtSearch 38 107 ($W - 46 - 80) 23 'Top, Left, Right')
-    $tip.SetToolTip($txtSearch, '글자를 넣으면 맞는 업무만 목록에 나옵니다 (Ctrl+F, Esc = 지우기)')
-    $btnView = Add-Ctl (New-Button '내용보기') ($W - 82) 106 74 25 'Top, Right'
+    [void](Add-Ctl $txtSearch 38 (107 + $Dy) ($W - 46 - 80) 23 'Top, Left, Right')
+    $tip.SetToolTip($txtSearch, '글자를 넣으면 맞는 업무만 목록에 나옵니다. 순번(숫자)을 넣으면 그 업무 내용이 나옵니다 (Ctrl+F, Esc = 지우기)')
+    $btnView = Add-Ctl (New-Button '내용보기') ($W - 82) (106 + $Dy) 74 25 'Top, Right'
 
     # 목록 영역 (접었다 폈다 함). 평소에는 입력칸 + 찾기 칸만 보이는 작은 창
-    $TopH = 134; $StatusH = 26; $CollapsedH = $TopH + $StatusH
+    $TopH = 134 + $Dy; $StatusH = 26; $CollapsedH = $TopH + $StatusH
     $script:expanded = $true
     $script:expandedH = $H
     $pnlList = New-Object System.Windows.Forms.Panel
@@ -385,6 +394,13 @@ try {
     $lstOpen.HorizontalScrollbar = $true
     $lstOpen.IntegralHeight = $false
     [void](Add-PCtl $lstOpen 8 18 ($W - 16) ($ph - 18 - 34) 'Top, Bottom, Left, Right')
+
+    # 찾기 칸에 순번을 넣으면 목록 자리에 그 업무의 전체 내용을 보여줌
+    $txtDetail = New-Object System.Windows.Forms.TextBox
+    $txtDetail.Multiline = $true; $txtDetail.ReadOnly = $true; $txtDetail.WordWrap = $true
+    $txtDetail.ScrollBars = 'Vertical'; $txtDetail.BackColor = [System.Drawing.Color]::White; $txtDetail.Visible = $false
+    [void](Add-PCtl $txtDetail 8 18 ($W - 16) ($ph - 18 - 34) 'Top, Bottom, Left, Right')
+    $script:detailItem = $null
 
     $btnDone    = Add-PCtl (New-Button '완료') 8 ($ph - 30) 60 26 'Bottom, Left'
     $btnRefresh = Add-PCtl (New-Button '새로고침') 72 ($ph - 30) 70 26 'Bottom, Left'
@@ -456,10 +472,24 @@ try {
     }
 
     function New-MemoItem([string]$line) {
-        return [pscustomobject]@{ Source = '메모'; Key = $line; Text = $line; Display = '[메모] ' + $line.Substring(4) }
+        return [pscustomobject]@{ Source = '메모'; Key = $line; Text = $line; Display = '[메모] ' + $line.Substring(4)
+            Seq = ''; Detail = $line.Substring(4).Replace(' | ', "`r`n").Replace(' / ', "`r`n    ") }
     }
 
     function Apply-Filter {
+        # 찾기 칸에 숫자만 있고 그 순번의 결재 항목이 있으면 목록 대신 내용을 보여줌
+        $q = $txtSearch.Text.Trim()
+        $script:detailItem = $null
+        if ($q -match '^[0-9]+$') {
+            foreach ($it in $script:allItems) { if ($it.Seq -eq $q) { $script:detailItem = $it; break } }
+        }
+        $lstOpen.Visible = ($null -eq $script:detailItem)
+        $txtDetail.Visible = ($null -ne $script:detailItem)
+        if ($script:detailItem) {
+            $txtDetail.Text = '[' + $script:detailItem.Source + "]`r`n" + $script:detailItem.Detail
+            $lblList.Text = '순번 {0} 업무 내용  ·  [완료] = 완료 처리' -f $q
+            return
+        }
         $words = @($txtSearch.Text.Trim() -split '\s+' | Where-Object { $_ })
         $list = [Collections.Generic.List[object]]::new()
         foreach ($it in $script:allItems) {
@@ -532,8 +562,12 @@ try {
 
     $doComplete = {
         $idx = $lstOpen.SelectedIndex
-        if ($idx -lt 0 -or $idx -ge $script:shown.Length) { Set-Status '완료할 항목을 먼저 고르세요.' $true; return }
-        $item = $script:shown[$idx]
+        $item = $script:detailItem
+        $fromDetail = ($null -ne $item)
+        if (-not $fromDetail) {
+            if ($idx -lt 0 -or $idx -ge $script:shown.Length) { Set-Status '완료할 항목을 먼저 고르세요.' $true; return }
+            $item = $script:shown[$idx]
+        }
         try {
             if ($item.Source -eq '결재') {
                 Complete-ExcelItem $item
@@ -548,7 +582,8 @@ try {
                 Update-List
                 Set-Status '파일 내용이 바뀌어 항목을 찾지 못했습니다. 목록을 새로 불러왔습니다.' $true
             }
-            if ($lstOpen.Items.Count -gt 0) { $lstOpen.SelectedIndex = [Math]::Min($idx, $lstOpen.Items.Count - 1) }
+            if ($fromDetail) { $txtSearch.Clear(); $txtSearch.Focus() | Out-Null }   # 번호로 찾아 완료했으면 찾기 칸을 비워 목록을 접음
+            elseif ($lstOpen.Items.Count -gt 0) { $lstOpen.SelectedIndex = [Math]::Min([Math]::Max($idx, 0), $lstOpen.Items.Count - 1) }
         } catch {
             Show-Failure '완료 처리' $_
         }
@@ -559,7 +594,9 @@ try {
     $lstOpen.Add_DoubleClick($doComplete)
     $txtSearch.Add_TextChanged({
         Apply-Filter
-        if ($txtSearch.Text.Trim() -and -not $script:expanded) { Set-Expanded $true }
+        # 찾기 칸이 비어 있으면 목록을 접고, 글자를 넣으면 펼침
+        $has = [bool]$txtSearch.Text.Trim()
+        if ($has -ne $script:expanded) { Set-Expanded $has }
     })
     $btnView.Add_Click({ Set-Expanded (-not $script:expanded) })
     $btnRefresh.Add_Click({ Update-List })
