@@ -374,10 +374,11 @@ namespace FmjMemo
             var head = rows[0];
             // '번호/ID/문서/코드'가 들어간 칸이 있으면 그 칸 값으로 같은 건인지 구분, 없으면 줄 전체로 구분
             // 단, 1,2,3…처럼 줄 순번인 칸은 매일 바뀔 수 있으므로 구분 기준에서 뺌
-            int seqCol = Array.FindIndex(head, h => h.Trim().TrimEnd('.').Equals("No", StringComparison.OrdinalIgnoreCase));
+            int seqCol = Array.FindIndex(head, h => HeaderKey(h) == "No.");
             if (seqCol < 0) seqCol = SequenceColumn(rows);
             // 15:48 작업 규칙: 완료된 줄은 지우지 않고 실마감일을 채우고 피드백 앞에 '완료'를 적음 → 목록에서 뺌
-            int doneCol = Array.IndexOf(head, "실마감일"), fbCol = Array.IndexOf(head, "피드백"), textCol = Array.IndexOf(head, "지시내용");
+            int doneCol = Array.FindIndex(head, h => HeaderKey(h) == "실마감일"), fbCol = Array.FindIndex(head, h => HeaderKey(h) == "피드백"),
+                textCol = Array.FindIndex(head, h => HeaderKey(h) == "지시내용");
             var pendingDone = PendingDoneNos();
             int keyCol = -1;
             for (int k = 0; k < head.Length; k++)
@@ -444,6 +445,23 @@ namespace FmjMemo
             public string Ns;
             public List<XmlElement> Xfs, Fills;
             public XmlElement CellXfs, FillsNode;
+        }
+
+        // 첫 줄 제목을 표준 이름으로 (띄어쓰기·마침표·대소문자 무시, No=번호=순번)
+        public static string HeaderKey(string h)
+        {
+            string n = Regex.Replace(h ?? "", @"[\s.·]", "").ToLowerInvariant();
+            if (n == "no" || n == "번호" || n == "순번" || n == "no번호") return "No.";
+            foreach (var c in Cols) if (n == Regex.Replace(c, @"[\s.]", "").ToLowerInvariant()) return c;
+            return null;
+        }
+
+        public static void CheckHeaders(Dictionary<string, int> col, List<string> found, string path)
+        {
+            var missing = Cols.Where(x => !col.ContainsKey(x)).ToArray();
+            if (missing.Length == 0) return;
+            throw new InvalidDataException(string.Format("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: {0}\n\n파일: {1}\n첫 줄 제목: {2}",
+                string.Join(", ", missing), Path.GetFileName(path), found.Count > 0 ? string.Join(" | ", found.Where(x => x.Length > 0)) : "(비어 있음)"));
         }
 
         static XmlDocument LoadXmlKeep(ZipArchive zip, string name)
@@ -640,9 +658,18 @@ namespace FmjMemo
                 }
                 var head = sh.Data.SelectSingleNode(P("row")) as XmlElement;
                 if (head != null)
-                    foreach (XmlElement c in head.SelectNodes(P("c"))) sh.Col[Clean(CellText(c, sh.Strings))] = ColIndex(c.GetAttribute("r"));
-                var missing = Cols.Where(x => !sh.Col.ContainsKey(x)).ToArray();
-                if (missing.Length > 0) throw new InvalidDataException("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: " + string.Join(", ", missing));
+                {
+                    var found = new List<string>();
+                    foreach (XmlElement c in head.SelectNodes(P("c")))
+                    {
+                        string h = Clean(CellText(c, sh.Strings));
+                        found.Add(h);
+                        string k = HeaderKey(h);
+                        if (k != null && !sh.Col.ContainsKey(k)) sh.Col[k] = ColIndex(c.GetAttribute("r"));
+                    }
+                    CheckHeaders(sh.Col, found, path);
+                }
+                else CheckHeaders(sh.Col, new List<string>(), path);
 
                 if (!edit(sh)) return;
                 SaveXml(zip, sheetPath, sh.Doc);
@@ -893,14 +920,15 @@ namespace FmjMemo
         static Dictionary<string, int> Columns(dynamic ws)
         {
             var col = new Dictionary<string, int>();
+            var found = new List<string>();
             for (int c = 1; c <= 40; c++)
             {
                 string h = Store.Clean(Text(ws.Cells[1, c]));
-                if (h.Length > 0 && !col.ContainsKey(h)) col[h] = c;
+                if (h.Length > 0) found.Add(h);
+                string k = Store.HeaderKey(h);
+                if (k != null && !col.ContainsKey(k)) col[k] = c;
             }
-            string[] need = { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" };
-            var missing = need.Where(x => !col.ContainsKey(x)).ToArray();
-            if (missing.Length > 0) throw new InvalidDataException("결재 엑셀 첫 줄에 이 제목 칸이 없습니다: " + string.Join(", ", missing));
+            Store.CheckHeaders(col, found, (string)ws.Parent.FullName);
             return col;
         }
 
@@ -993,6 +1021,7 @@ namespace FmjMemo
 
     public class MainForm : Form
     {
+        public const string Version = "10/19 엑셀직접저장 3판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
         TextBox txtContent, txtOwner, txtSearch, txtDetail;
         DateTimePicker dtDue;
         CheckBox chkUrgent;
@@ -1029,7 +1058,7 @@ namespace FmjMemo
             const int W = 420;
             expandedH = 330 + Dy;
             var small = new Font("맑은 고딕", 8.5F);
-            Text = "업무메모";
+            Text = "업무메모  (" + Version + ")";
             Font = new Font("맑은 고딕", 9F);
             ClientSize = new Size(W, expandedH);
             StartPosition = FormStartPosition.CenterScreen;
