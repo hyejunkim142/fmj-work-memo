@@ -184,12 +184,13 @@ namespace FmjMemo
             AppendText(DataFile, text);
         }
 
-        public static bool CompleteTask(string line)
+        public static bool CompleteTask(string line, string note = "")
         {
             var lines = ReadLines();
             int idx = Array.IndexOf(lines, line);
             if (idx < 0) return false;   // 그 사이 메모장 등에서 바뀐 경우
-            lines[idx] = "[v]" + line.Substring(3) + " | 완료 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            note = Clean(note);
+            lines[idx] = "[v]" + line.Substring(3) + (note.Length > 0 ? " | 피드백 " + note : "") + " | 완료 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm");
             SaveLines(lines);
             return true;
         }
@@ -776,18 +777,28 @@ namespace FmjMemo
         }
 
         // No.로 줄을 찾아 완료 표시 (노란색 + 피드백 앞 '완료 — …' + 실마감일). 지시내용이 다르면 손대지 않고 false
-        public static bool CompleteExcelRow(string path, string no, string content, DateTime when)
+        // 피드백 칸에 넣을 글. complete = 완료 표시, 아니면 중간 진행 메모를 앞에 더함
+        public static string FeedbackText(string old, DateTime when, string note, bool complete)
         {
-            try { return CompleteExcelRowFile(path, no, content, when); }
+            old = (old ?? "").Trim(); note = Clean(note ?? "");
+            if (complete)
+                return string.Format("완료 — 직접 완료 처리({0}/{1})", when.Month, when.Day) + (note.Length > 0 ? " " + note : "") + (old.Length > 0 ? ". " + old : "");
+            return string.Format("{0}/{1} {2}", when.Month, when.Day, note) + (old.Length > 0 ? " / " + old : "");
+        }
+
+        // complete=true: 완료 표시 (노란색 + 피드백 + 실마감일), false: 피드백 칸 앞에 진행 메모만 더함
+        public static bool CompleteExcelRow(string path, string no, string content, DateTime when, string note = "", bool complete = true)
+        {
+            try { return CompleteExcelRowFile(path, no, content, when, note, complete); }
             catch (ExcelLockedException)
             {
-                bool? ok = ExcelLive.CompleteRow(path, no, content, when);
+                bool? ok = ExcelLive.CompleteRow(path, no, content, when, note, complete);
                 if (ok.HasValue) return ok.Value;
                 throw;
             }
         }
 
-        static bool CompleteExcelRowFile(string path, string no, string content, DateTime when)
+        static bool CompleteExcelRowFile(string path, string no, string content, DateTime when, string note, bool complete)
         {
             bool found = false;
             EditExcel(path, sh =>
@@ -795,6 +806,13 @@ namespace FmjMemo
                 var row = DataRows(sh).FirstOrDefault(r => CellText(GetCell(sh, r, sh.Col["No."], false), sh.Strings).Trim() == no);
                 if (row == null) return false;
                 if (Clean(CellText(GetCell(sh, row, sh.Col["지시내용"], false), sh.Strings)) != content) return false;
+                var fb0 = GetCell(sh, row, sh.Col["피드백"], true);
+                if (!complete)
+                {
+                    SetText(sh, fb0, FeedbackText(CellText(fb0, sh.Strings), when, note, false));
+                    found = true;
+                    return true;
+                }
                 int yellow = sh.Xfs != null ? YellowFill(sh) : 0;
                 int dateStyle = StyleOf(GetCell(sh, row, sh.Col["지시일"], false));   // 실마감일도 날짜 서식으로
                 int lo = Cols.Min(x => sh.Col[x]), hi = Cols.Max(x => sh.Col[x]);
@@ -806,7 +824,7 @@ namespace FmjMemo
                 }
                 var fb = GetCell(sh, row, sh.Col["피드백"], false);
                 string old = CellText(fb, sh.Strings).Trim();
-                SetText(sh, fb, string.Format("완료 — 직접 완료 처리({0}/{1})", when.Month, when.Day) + (old.Length > 0 ? ". " + old : ""));
+                SetText(sh, fb, FeedbackText(old, when, note, true));
                 SetNumber(sh, GetCell(sh, row, sh.Col["실마감일"], false), when.Date.ToOADate());
                 found = true;
                 return true;
@@ -815,7 +833,7 @@ namespace FmjMemo
         }
 
         // ---------- 엑셀 반영 대기 (엑셀이 열려 있을 때) ----------
-        // 한 줄 = 한 건.  ADD<TAB>지시일<TAB>담당<TAB>마감(-)<TAB>내용   /   DONE<TAB>No<TAB>완료일<TAB>지시내용
+        // 한 줄 = 한 건.  ADD<TAB>지시일<TAB>담당<TAB>마감(-)<TAB>내용   /   DONE(완료)·FB(진행 메모)<TAB>No<TAB>날짜<TAB>지시내용<TAB>피드백
 
         static string Esc(string s) { return (s ?? "").Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r\n", "\n").Replace("\n", "\\n"); }
 
@@ -854,9 +872,9 @@ namespace FmjMemo
             AppendText(PendingFile, string.Join("\t", "ADD", date.ToString("yyyy-MM-dd"), Esc(owner), due.HasValue ? due.Value.ToString("yyyy-MM-dd") : "-", Esc(content)) + "\r\n");
         }
 
-        public static void QueueDone(string no, string content, DateTime when)
+        public static void QueueDone(string no, string content, DateTime when, string note = "", bool complete = true)
         {
-            AppendText(PendingFile, string.Join("\t", "DONE", no, when.ToString("yyyy-MM-dd"), Esc(content)) + "\r\n");
+            AppendText(PendingFile, string.Join("\t", complete ? "DONE" : "FB", no, when.ToString("yyyy-MM-dd"), Esc(content), Esc(note)) + "\r\n");
         }
 
         public static HashSet<string> PendingDoneNos()
@@ -879,10 +897,10 @@ namespace FmjMemo
                     var p = lines[i].Split('\t');
                     if (p[0] == "ADD" && p.Length >= 5)
                         AddExcelRow(file, Day(p[1]), Unesc(p[2]), p[3] == "-" ? (DateTime?)null : Day(p[3]), Unesc(p[4]));
-                    else if (p[0] == "DONE" && p.Length >= 4)
+                    else if ((p[0] == "DONE" || p[0] == "FB") && p.Length >= 4)
                     {
-                        if (!CompleteExcelRow(file, p[1], Unesc(p[3]), Day(p[2])))
-                            Log("대기 중이던 완료 처리를 엑셀에서 찾지 못함: No." + p[1] + " " + Unesc(p[3]));
+                        if (!CompleteExcelRow(file, p[1], Unesc(p[3]), Day(p[2]), p.Length >= 5 ? Unesc(p[4]) : "", p[0] == "DONE"))
+                            Log("대기 중이던 완료/피드백을 엑셀에서 찾지 못함: No." + p[1] + " " + Unesc(p[3]));
                     }
                     else Log("엑셀 반영 대기 파일의 알 수 없는 줄: " + lines[i]);
                 }
@@ -1015,7 +1033,7 @@ namespace FmjMemo
             });
         }
 
-        public static bool? CompleteRow(string path, string no, string content, DateTime when)
+        public static bool? CompleteRow(string path, string no, string content, DateTime when, string note, bool complete)
         {
             return Run<bool?>(() =>
             {
@@ -1027,11 +1045,18 @@ namespace FmjMemo
                 for (int r = 2; r <= last && rn < 0; r++)
                     if (Text(ws.Cells[r, col["No."]]).Trim() == no) rn = r;
                 if (rn < 0 || Store.Clean(Text(ws.Cells[rn, col["지시내용"]])) != content) return false;
+                if (!complete)
+                {
+                    dynamic f0 = ws.Cells[rn, col["피드백"]];
+                    f0.Value2 = Store.FeedbackText(Text(f0), when, note, false);
+                    Save(wb);
+                    return true;
+                }
                 int lo = col.Values.Min(), hi = new[] { "No.", "지시일", "지시내용", "담당자", "마감일", "피드백", "실마감일" }.Max(x => col[x]);
                 ws.Range[ws.Cells[rn, lo], ws.Cells[rn, hi]].Interior.Color = Yellow;
                 dynamic fb = ws.Cells[rn, col["피드백"]];
                 string old = Text(fb).Trim();
-                fb.Value2 = string.Format("완료 — 직접 완료 처리({0}/{1})", when.Month, when.Day) + (old.Length > 0 ? ". " + old : "");
+                fb.Value2 = Store.FeedbackText(old, when, note, true);
                 dynamic done = ws.Cells[rn, col["실마감일"]];
                 done.NumberFormat = ws.Cells[rn, col["지시일"]].NumberFormat;
                 done.Value2 = when.Date.ToOADate();
@@ -1043,7 +1068,7 @@ namespace FmjMemo
 
     public class MainForm : Form
     {
-        public const string Version = "10/19 엑셀직접저장 5판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
+        public const string Version = "10/19 피드백 6판";   // 어느 exe가 실행 중인지 제목줄에서 확인용
         TextBox txtContent, txtOwner, txtSearch, txtDetail;
         DateTimePicker dtDue;
         CheckBox chkUrgent;
@@ -1150,6 +1175,7 @@ namespace FmjMemo
             panelButton("완료", 8, 60, (s, e) => DoComplete(), BL);
             panelButton("새로고침", 72, 70, (s, e) => RefreshList(), BL);
             panelButton("폴더", 146, 50, (s, e) => OpenFolder(), BL);
+            panelButton("피드백", 200, 64, (s, e) => DoFeedback(), BL);
             panelButton("메모장", W - 72, 64, (s, e) => OpenNotepad(), AnchorStyles.Bottom | AnchorStyles.Right);
 
             lblStatus = new Label { AutoSize = false, AutoEllipsis = true, Font = small, ForeColor = Color.DimGray,
@@ -1402,17 +1428,19 @@ namespace FmjMemo
                 if (idx < 0 || idx >= shown.Count) { SetStatus("완료할 항목을 먼저 고르세요.", true); return; }
                 it = shown[idx];
             }
+            string note = AskText("완료 — No." + it.Seq, it.Content + "\n\n완료 피드백을 적어 주세요. 없으면 비워 두고 [확인]. [취소]를 누르면 완료하지 않습니다.", false);
+            if (note == null) { SetStatus("완료를 취소했습니다.", false); return; }
             try
             {
                 if (it.Source == "결재")
                 {
                     bool queued = false, ok = true;
-                    if (SafeFlush() > 0) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
+                    if (SafeFlush() > 0) { Store.QueueDone(it.Seq, it.Content, DateTime.Now, note); queued = true; }
                     else
                     {
                         Store.LiveNote = "";
-                        try { ok = Store.CompleteExcelRow(Store.LatestExcel(), it.Seq, it.Content, DateTime.Now); }
-                        catch (ExcelLockedException) { Store.QueueDone(it.Seq, it.Content, DateTime.Now); queued = true; }
+                        try { ok = Store.CompleteExcelRow(Store.LatestExcel(), it.Seq, it.Content, DateTime.Now, note); }
+                        catch (ExcelLockedException) { Store.QueueDone(it.Seq, it.Content, DateTime.Now, note); queued = true; }
                     }
                     if (!ok)
                     {
@@ -1425,7 +1453,7 @@ namespace FmjMemo
                     if (queued) SetStatus("완료 대기: No." + it.Seq + "  ·  " + PendingMsg(Store.PendingLines().Count), true);
                     else SetStatus("엑셀에 완료 표시했습니다: No." + it.Seq + (Store.LiveNote.Length > 0 ? "  ·  " + Store.LiveNote : "") + "  " + it.Content, false);
                 }
-                else if (Store.CompleteTask(it.Key))
+                else if (Store.CompleteTask(it.Key, note))
                 {
                     allItems.Remove(it);
                     ApplyFilter();
@@ -1440,6 +1468,52 @@ namespace FmjMemo
                 else if (lstOpen.Items.Count > 0) lstOpen.SelectedIndex = Math.Min(Math.Max(idx, 0), lstOpen.Items.Count - 1);
             }
             catch (Exception e) { ShowFailure("완료 처리", e); }
+        }
+
+        // 완료하지 않고 피드백 칸에 진행 메모만 남김 (예: '10/19 업체 회신 대기')
+        void DoFeedback()
+        {
+            Item it = detailItem;
+            if (it == null && !NumberQuery() && lstOpen.SelectedIndex >= 0 && lstOpen.SelectedIndex < shown.Count) it = shown[lstOpen.SelectedIndex];
+            if (it == null) { SetStatus("찾기 칸에 번호를 넣거나 목록에서 업무를 고른 뒤 [피드백]을 누르세요.", true); return; }
+            if (it.Source != "결재") { SetStatus("피드백은 결재 엑셀 업무에만 남길 수 있습니다.", true); return; }
+            string note = AskText("피드백 — No." + it.Seq, it.Content + "\n\n진행 상황을 적어 주세요. 오늘 날짜가 앞에 붙어 피드백 칸 맨 앞에 들어갑니다. (완료 표시는 안 함)", true);
+            if (string.IsNullOrWhiteSpace(note)) { SetStatus("피드백을 남기지 않았습니다.", false); return; }
+            try
+            {
+                bool queued = false, ok = true;
+                if (SafeFlush() > 0) { Store.QueueDone(it.Seq, it.Content, DateTime.Now, note, false); queued = true; }
+                else
+                {
+                    Store.LiveNote = "";
+                    try { ok = Store.CompleteExcelRow(Store.LatestExcel(), it.Seq, it.Content, DateTime.Now, note, false); }
+                    catch (ExcelLockedException) { Store.QueueDone(it.Seq, it.Content, DateTime.Now, note, false); queued = true; }
+                }
+                RefreshList();   // 찾기 칸은 그대로 두어 바뀐 피드백이 바로 보이게 함
+                if (!ok) SetStatus(string.Format("최신 엑셀에서 No.{0} 줄을 찾지 못했습니다(내용이 바뀜).", it.Seq), true);
+                else if (queued) SetStatus("피드백 대기: No." + it.Seq + "  ·  " + PendingMsg(Store.PendingLines().Count), true);
+                else SetStatus("피드백을 남겼습니다: No." + it.Seq + (Store.LiveNote.Length > 0 ? "  ·  " + Store.LiveNote : ""), false);
+            }
+            catch (Exception e) { ShowFailure("피드백 저장", e); }
+        }
+
+        // 한 줄 입력 창. 확인 = 입력한 글(빈 글 가능), 취소/닫기 = null
+        string AskText(string title, string prompt, bool required)
+        {
+            using (var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false, ClientSize = new Size(400, 200), Font = Font })
+            {
+                var lb = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(380, 110), AutoEllipsis = true };
+                var tb = new TextBox { Location = new Point(10, 126), Size = new Size(380, 23) };
+                var ok = new Button { Text = "확인", Location = new Point(224, 160), Size = new Size(80, 28), DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "취소", Location = new Point(310, 160), Size = new Size(80, 28), DialogResult = DialogResult.Cancel };
+                f.Controls.AddRange(new Control[] { lb, tb, ok, cancel });
+                f.AcceptButton = ok; f.CancelButton = cancel;
+                f.Shown += (s, e) => tb.Focus();
+                if (f.ShowDialog(this) != DialogResult.OK) return null;
+                string t = tb.Text.Trim();
+                return required && t.Length == 0 ? null : t;
+            }
         }
 
         void OpenNotepad()
